@@ -10,829 +10,395 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
-import android.view.Gravity
-import android.view.View
 import android.view.ViewGroup
-import android.view.inputmethod.EditorInfo
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.WebSettings
+import android.webkit.WebChromeClient
 import android.widget.Button
 import android.widget.EditText
-import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.HorizontalScrollView
 import android.widget.Toast
-
 import org.json.JSONObject
-import org.json.JSONArray
-
 import java.net.URL
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
     private lateinit var security: SecurityManager
+    private val blocker = AdBlockManager()
 
     private lateinit var root: LinearLayout
-
+    private lateinit var content: LinearLayout
     private lateinit var address: EditText
-
-    private lateinit var tabBar: LinearLayout
-
-    private lateinit var browserContainer: LinearLayout
+    private lateinit var tabStrip: LinearLayout
 
     private val tabs = mutableListOf<WebView>()
-
     private var activeTab = -1
+    private var wrongAttempts = 0
 
-    private var failedAttempts = 0
-
-    private var unlocked = false
-
-    private var disabled = false
-
+    private var killed = false
     private var minimumVersion = 1
-
     private var updateUrl = ""
 
+    private val executor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
 
-    private val executor = Executors.newSingleThreadExecutor()
-
-    private val desktopAgent =
+    private val windowsUA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/131.0.0.0 Safari/537.36"
 
-    private val searchEngines = mapOf(
-
-        "Google" to
-            "https://www.google.com/search?q=",
-
-        "Bing" to
-            "https://www.bing.com/search?q=",
-
-        "DuckDuckGo" to
-            "https://duckduckgo.com/?q=",
-
-        "Brave" to
-            "https://search.brave.com/search?q=",
-
-        "Perplexity" to
-            "https://www.perplexity.ai/search?q="
+    private val engines = linkedMapOf(
+        "Google" to "https://www.google.com/search?q=",
+        "Bing" to "https://www.bing.com/search?q=",
+        "DuckDuckGo" to "https://duckduckgo.com/?q=",
+        "Brave" to "https://search.brave.com/search?q=",
+        "Perplexity" to "https://www.perplexity.ai/search?q="
     )
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    private val prefs by lazy {
+        getSharedPreferences("dexbrowse_settings", MODE_PRIVATE)
+    }
 
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         security = SecurityManager(this)
+        blocker.enabled = prefs.getBoolean("adblock", true)
 
         root = LinearLayout(this).apply {
-
             orientation = LinearLayout.VERTICAL
-
-            setBackgroundColor(
-                Color.parseColor("#0F172A")
-            )
+            setBackgroundColor(Color.WHITE)
         }
 
         setContentView(root)
 
-        showLogin()
+        if (security.isProtected()) showLock() else showBrowser()
 
         checkRemoteConfig()
     }
 
-    private fun button(
-        text: String,
-        action: () -> Unit
-    ): Button {
-
+    private fun button(label: String, action: () -> Unit): Button {
         return Button(this).apply {
-
-            this.text = text
-
-            setOnClickListener {
-                action()
-            }
+            text = label
+            setOnClickListener { action() }
         }
     }
 
-    private fun textInput(
-        hint: String,
-        password: Boolean = false
-    ): EditText {
-
+    private fun input(hintText: String, secret: Boolean = false): EditText {
         return EditText(this).apply {
-
-            this.hint = hint
-
-            setTextColor(Color.WHITE)
-
-            setHintTextColor(Color.LTGRAY)
-
-            if (password) {
-
-                inputType =
-                    InputType.TYPE_CLASS_TEXT or
+            hint = hintText
+            if (secret) {
+                inputType = InputType.TYPE_CLASS_TEXT or
                     InputType.TYPE_TEXT_VARIATION_PASSWORD
             }
         }
     }
 
-    private fun showLogin() {
-
-        unlocked = false
-
+    private fun showLock() {
         root.removeAllViews()
 
-        val username = security.getUsername()
-
-        val title = TextView(this).apply {
-
-            text = "Hello, $username"
-
-            textSize = 25f
-
-            gravity = Gravity.CENTER
-
-            setTextColor(Color.WHITE)
-
-            setPadding(20, 100, 20, 40)
+        val greeting = TextView(this).apply {
+            text = "Hello, ${security.username()}"
+            textSize = 26f
+            setPadding(20, 90, 20, 40)
         }
 
-        root.addView(title)
+        root.addView(greeting)
 
-        if (!security.hasPassword()) {
-
-            showRegistration()
-
-            return
-        }
-
-        val password = textInput(
-            "Enter Password",
-            true
-        )
-
+        val password = input("Browser Password", true)
         root.addView(password)
 
-        root.addView(
-            button("UNLOCK DEXBROWSE") {
+        root.addView(button("Unlock") {
+            if (security.verifyPassword(password.text.toString())) {
+                wrongAttempts = 0
+                showBrowser()
+            } else {
+                wrongAttempts++
+                password.setText("")
 
-                if (disabled) {
-
-                    showDisabledScreen()
-
-                    return@button
-                }
-
-                if (
-                    security.verifyPassword(
-                        password.text.toString()
-                    )
-                ) {
-
-                    failedAttempts = 0
-
-                    openBrowser()
-
+                if (wrongAttempts >= 2) {
+                    wrongAttempts = 0
+                    startActivity(Intent(this, GuestActivity::class.java))
+                    finish()
                 } else {
-
-                    failedAttempts++
-
-                    password.setText("")
-
-                    Toast.makeText(
-                        this,
-                        "Incorrect password",
-                        Toast.LENGTH_SHORT
-                    ).show()
-
-                    if (failedAttempts >= 3) {
-
-                        failedAttempts = 0
-
-                        Toast.makeText(
-                            this,
-                            "Too many attempts. Try again later.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
+                    Toast.makeText(this, "Incorrect password", Toast.LENGTH_SHORT).show()
                 }
             }
-        )
+        })
 
-        root.addView(
-            button("FORGOT PASSWORD") {
-
-                showRecovery()
-            }
-        )
+        root.addView(button("Forgot Password") {
+            showRecoveryDialog()
+        })
     }
 
-    private fun showRegistration() {
+    private fun showRecoveryDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20, 10, 20, 10)
+        }
 
-        val username = textInput(
-            "Username or Email"
-        )
+        val phrase = input("Recovery Phrase", true)
+        val newPassword = input("New Password (8+ characters)", true)
 
-        val password = textInput(
-            "Create Password (8+ characters)",
-            true
-        )
+        container.addView(phrase)
+        container.addView(newPassword)
 
-        val recovery = textInput(
-            "Recovery Phrase (12+ characters)"
-        )
-
-        root.addView(username)
-
-        root.addView(password)
-
-        root.addView(recovery)
-
-        root.addView(
-            button("CREATE ACCOUNT") {
-
-                val name = username.text.toString().trim()
-
-                val pass = password.text.toString()
-
-                val phrase = recovery.text.toString()
-
+        AlertDialog.Builder(this)
+            .setTitle("Recover DexBrowse")
+            .setView(container)
+            .setPositiveButton("Recover") { _, _ ->
                 if (
-                    name.isBlank() ||
-                    pass.length < 8 ||
-                    phrase.length < 12
-                ) {
-
-                    Toast.makeText(
-                        this,
-                        "Enter a username, password and recovery phrase",
-                        Toast.LENGTH_LONG
-                    ).show()
-
-                    return@button
-                }
-
-                security.setUsername(name)
-
-                security.savePassword(pass)
-
-                security.saveRecoveryPhrase(phrase)
-
-                openBrowser()
-            }
-        )
-    }
-
-    private fun showRecovery() {
-
-        root.removeAllViews()
-
-        val phrase = textInput(
-            "Enter Recovery Phrase",
-            true
-        )
-
-        val newPassword = textInput(
-            "New Password",
-            true
-        )
-
-        root.addView(phrase)
-
-        root.addView(newPassword)
-
-        root.addView(
-            button("RESET PASSWORD") {
-
-                if (
-                    security.verifyRecoveryPhrase(
-                        phrase.text.toString()
-                    ) &&
+                    security.verifyRecovery(phrase.text.toString()) &&
                     newPassword.text.length >= 8
                 ) {
-
-                    security.savePassword(
-                        newPassword.text.toString()
-                    )
-
-                    showLogin()
-
+                    security.resetPassword(newPassword.text.toString())
+                    Toast.makeText(this, "Password updated", Toast.LENGTH_SHORT).show()
                 } else {
-
-                    Toast.makeText(
-                        this,
-                        "Recovery failed",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    Toast.makeText(this, "Recovery failed", Toast.LENGTH_SHORT).show()
                 }
             }
-        )
-
-        root.addView(
-            button("BACK") {
-                showLogin()
-            }
-        )
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
-    private fun openBrowser() {
-
-        if (disabled) {
-
-            showDisabledScreen()
-
-            return
-        }
-
-        if (BuildConfig.VERSION_CODE < minimumVersion) {
-
-            showUpdateScreen()
-
-            return
-        }
-
-        unlocked = true
-
+    private fun showBrowser() {
         root.removeAllViews()
 
-        val title = TextView(this).apply {
-
-            text = "DexBrowse By Fuad"
-
-            textSize = 18f
-
-            setTextColor(Color.WHITE)
-
-            setPadding(16, 10, 16, 10)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.rgb(245, 245, 250))
         }
 
-        root.addView(title)
+        header.addView(button("←") {
+            current()?.let { if (it.canGoBack()) it.goBack() }
+        })
 
-        val controls = LinearLayout(this).apply {
+        header.addView(button("→") {
+            current()?.let { if (it.canGoForward()) it.goForward() }
+        })
 
+        header.addView(button("⌂") {
+            current()?.loadUrl("https://www.google.com")
+        })
+
+        header.addView(button("+") {
+            addTab("https://www.google.com")
+        })
+
+        header.addView(button("⋮") {
+            showSettings()
+        })
+
+        root.addView(HorizontalScrollView(this).apply {
+            addView(header)
+        })
+
+        tabStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
 
-        controls.addView(
-            button("◀") {
+        root.addView(HorizontalScrollView(this).apply {
+            addView(tabStrip)
+        })
 
-                currentWebView()?.let {
-
-                    if (it.canGoBack()) {
-                        it.goBack()
-                    }
-                }
-            }
-        )
-
-        controls.addView(
-            button("▶") {
-
-                currentWebView()?.let {
-
-                    if (it.canGoForward()) {
-                        it.goForward()
-                    }
-                }
-            }
-        )
-
-        controls.addView(
-            button("↻") {
-
-                currentWebView()?.reload()
-            }
-        )
-
-        controls.addView(
-            button("+") {
-
-                addTab(
-                    security.getHomePage()
-                )
-            }
-        )
-
-        controls.addView(
-            button("⚙") {
-
-                showSettings()
-            }
-        )
-
-        root.addView(
-            HorizontalScrollView(this).apply {
-                addView(controls)
-            }
-        )
-
-        tabBar = LinearLayout(this).apply {
-
+        val nav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
 
-        root.addView(
-            HorizontalScrollView(this).apply {
-                addView(tabBar)
-            }
-        )
-
-        val addressRow = LinearLayout(this).apply {
-
-            orientation = LinearLayout.HORIZONTAL
+        address = input("Search or enter address").apply {
+            setSingleLine(true)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
 
-        address = textInput(
-            "Search or enter URL"
-        )
+        nav.addView(address)
+        nav.addView(button("Go") {
+            navigate(address.text.toString())
+        })
 
-        address.layoutParams =
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f
-            )
+        root.addView(nav)
 
-        address.imeOptions =
-            EditorInfo.IME_ACTION_GO
-
-        address.setSingleLine(true)
-
-        address.setOnEditorActionListener { _, _, _ ->
-
-            navigate(
-                address.text.toString()
-            )
-
-            true
-        }
-
-        addressRow.addView(address)
-
-        addressRow.addView(
-            button("GO") {
-
-                navigate(
-                    address.text.toString()
-                )
-            }
-        )
-
-        root.addView(addressRow)
-
-        browserContainer = LinearLayout(this).apply {
-
+        content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-
-            layoutParams =
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    0,
-                    1f
-                )
         }
 
-        root.addView(browserContainer)
+        root.addView(
+            content,
+            LinearLayout.LayoutParams(-1, 0, 1f)
+        )
 
         tabs.clear()
-
         activeTab = -1
-
-        addTab(
-            security.getHomePage()
-        )
+        addTab(prefs.getString("homepage", "https://www.google.com")!!)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun addTab(url: String) {
-
         val webView = WebView(this)
 
         webView.settings.apply {
-
             javaScriptEnabled = true
-
             domStorageEnabled = true
-
+            userAgentString = windowsUA
             useWideViewPort = true
-
             loadWithOverviewMode = true
-
-            builtInZoomControls = true
-
-            displayZoomControls = false
-
-            userAgentString = desktopAgent
-
-            setSupportZoom(true)
+            javaScriptCanOpenWindowsAutomatically = false
+            setSupportMultipleWindows(true)
         }
 
-        webView.webViewClient =
-            object : WebViewClient() {
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: android.os.Message?
+            ): Boolean {
+                return false
+            }
+        }
 
-                override fun onPageFinished(
-                    view: WebView,
-                    url: String
-                ) {
-
-                    super.onPageFinished(
-                        view,
-                        url
-                    )
-
-                    if (
-                        tabs.indexOf(view) == activeTab
-                    ) {
-
-                        address.setText(url)
-                    }
-
-                    saveHistory(url)
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): android.webkit.WebResourceResponse? {
+                return request?.url?.toString()?.let {
+                    blocker.intercept(it)
                 }
             }
 
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                if (tabs.indexOf(view) == activeTab) {
+                    address.setText(url)
+                }
+            }
+        }
+
         tabs.add(webView)
-
         activeTab = tabs.lastIndex
-
         renderTabs()
-
-        showActiveTab()
-
+        displayTab()
         webView.loadUrl(url)
     }
 
-    private fun currentWebView(): WebView? {
+    private fun current(): WebView? = tabs.getOrNull(activeTab)
 
-        return tabs.getOrNull(activeTab)
-    }
-
-    private fun showActiveTab() {
-
-        browserContainer.removeAllViews()
-
-        val webView =
-            currentWebView() ?: return
-
-        (webView.parent as? ViewGroup)
-            ?.removeView(webView)
-
-        browserContainer.addView(
-            webView,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-
-        address.setText(
-            webView.url ?: ""
-        )
+    private fun displayTab() {
+        val view = current() ?: return
+        content.removeAllViews()
+        (view.parent as? ViewGroup)?.removeView(view)
+        content.addView(view, LinearLayout.LayoutParams(-1, -1))
+        address.setText(view.url ?: "")
     }
 
     private fun renderTabs() {
-
-        tabBar.removeAllViews()
-
+        tabStrip.removeAllViews()
         tabs.forEachIndexed { index, _ ->
-
-            tabBar.addView(
-                button("Tab ${index + 1}") {
-
-                    activeTab = index
-
-                    showActiveTab()
-                }
-            )
+            tabStrip.addView(button("Tab ${index + 1}") {
+                activeTab = index
+                displayTab()
+            })
         }
     }
 
-    private fun navigate(input: String) {
-
-        val value = input.trim()
-
+    private fun navigate(text: String) {
+        val value = text.trim()
         if (value.isBlank()) return
 
         val url = when {
-
             value.startsWith("https://") -> value
-
             value.startsWith("http://") -> value
-
-            value.contains(".") &&
-                !value.contains(" ") -> {
-
-                "https://$value"
-            }
-
+            value.contains(".") && !value.contains(" ") -> "https://$value"
             else -> {
-
-                val engine =
-                    security.getSearchEngine()
-
-                val base =
-                    searchEngines[engine]
-                        ?: searchEngines["Google"]!!
-
-                base + Uri.encode(value)
+                val selected = prefs.getString("engine", "Google") ?: "Google"
+                (engines[selected] ?: engines["Google"]!!) + Uri.encode(value)
             }
         }
 
-        currentWebView()?.loadUrl(url)
-    }
-
-    private fun saveHistory(url: String) {
-
-        if (
-            !url.startsWith("https://") &&
-            !url.startsWith("http://")
-        ) return
-
-        val prefs = getSharedPreferences(
-            "dexbrowse_history",
-            MODE_PRIVATE
-        )
-
-        val history = try {
-
-            JSONArray(
-                prefs.getString(
-                    "history",
-                    "[]"
-                )
-            )
-
-        } catch (_: Exception) {
-
-            JSONArray()
-        }
-
-        history.put(url)
-
-        // Keep only the latest 500 entries.
-        val trimmed = JSONArray()
-
-        val start =
-            (history.length() - 500)
-                .coerceAtLeast(0)
-
-        for (i in start until history.length()) {
-
-            trimmed.put(
-                history.optString(i)
-            )
-        }
-
-        prefs.edit()
-            .putString(
-                "history",
-                trimmed.toString()
-            )
-            .apply()
-    }
-
-    private fun showHistory() {
-
-        val prefs = getSharedPreferences(
-            "dexbrowse_history",
-            MODE_PRIVATE
-        )
-
-        val history = try {
-
-            JSONArray(
-                prefs.getString(
-                    "history",
-                    "[]"
-                )
-            )
-
-        } catch (_: Exception) {
-
-            JSONArray()
-        }
-
-        val items = mutableListOf<String>()
-
-        for (i in history.length() - 1 downTo 0) {
-
-            items.add(
-                history.optString(i)
-            )
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("Browsing History")
-            .setItems(
-                items.toTypedArray()
-            ) { _, index ->
-
-                navigate(items[index])
-            }
-            .setPositiveButton(
-                "Clear History"
-            ) { _, _ ->
-
-                AlertDialog.Builder(this)
-                    .setTitle("Clear browsing history?")
-                    .setMessage(
-                        "This removes locally saved history entries."
-                    )
-                    .setPositiveButton("Clear") { _, _ ->
-
-                        prefs.edit()
-                            .remove("history")
-                            .apply()
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
-            }
-            .setNegativeButton("Close", null)
-            .show()
+        current()?.loadUrl(url)
     }
 
     private fun showSettings() {
-
-        val options = arrayOf(
-            "History",
+        val items = arrayOf(
             "Search Engine",
-            "Change Homepage",
-            "Open AI Search",
+            "Ad Blocking",
+            "Set Homepage",
+            "Enable Password Protection",
             "Lock Browser"
         )
 
         AlertDialog.Builder(this)
             .setTitle("DexBrowse Settings")
-            .setItems(options) { _, index ->
-
-                when (index) {
-
-                    0 -> showHistory()
-
-                    1 -> showSearchSettings()
-
-                    2 -> changeHomePage()
-
-                    3 -> navigate(
-                        "https://www.perplexity.ai"
-                    )
-
-                    4 -> showLogin()
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> {
+                        val names = engines.keys.toTypedArray()
+                        AlertDialog.Builder(this)
+                            .setItems(names) { _, selected ->
+                                prefs.edit().putString("engine", names[selected]).apply()
+                            }
+                            .show()
+                    }
+                    1 -> {
+                        blocker.enabled = !blocker.enabled
+                        prefs.edit().putBoolean("adblock", blocker.enabled).apply()
+                        Toast.makeText(
+                            this,
+                            "Ad blocking: ${blocker.enabled}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    2 -> {
+                        val field = input("Homepage URL")
+                        field.setText(prefs.getString("homepage", "https://www.google.com"))
+                        AlertDialog.Builder(this)
+                            .setTitle("Homepage")
+                            .setView(field)
+                            .setPositiveButton("Save") { _, _ ->
+                                val url = field.text.toString()
+                                if (url.startsWith("https://")) {
+                                    prefs.edit().putString("homepage", url).apply()
+                                }
+                            }
+                            .show()
+                    }
+                    3 -> configureProtection()
+                    4 -> if (security.isProtected()) showLock()
                 }
             }
             .show()
     }
 
-    private fun showSearchSettings() {
+    private fun configureProtection() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
 
-        val engines =
-            searchEngines.keys.toTypedArray()
+        val username = input("Username")
+        val password = input("Password (8+ characters)", true)
+        val recovery = input("Recovery Phrase (12+ characters)", true)
 
-        AlertDialog.Builder(this)
-            .setTitle("Search Engine")
-            .setItems(engines) { _, index ->
-
-                security.setSearchEngine(
-                    engines[index]
-                )
-            }
-            .show()
-    }
-
-    private fun changeHomePage() {
-
-        val input = textInput(
-            "Homepage URL"
-        )
-
-        input.setText(
-            security.getHomePage()
-        )
+        box.addView(username)
+        box.addView(password)
+        box.addView(recovery)
 
         AlertDialog.Builder(this)
-            .setTitle("Change Homepage")
-            .setView(input)
+            .setTitle("Enable Protection")
+            .setView(box)
             .setPositiveButton("Save") { _, _ ->
-
-                val url = input.text.toString().trim()
-
-                if (url.startsWith("https://")) {
-
-                    security.setHomePage(url)
-
-                } else {
-
-                    Toast.makeText(
-                        this,
-                        "Use an HTTPS homepage",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                try {
+                    security.configure(
+                        username.text.toString(),
+                        password.text.toString(),
+                        recovery.text.toString()
+                    )
+                    Toast.makeText(this, "Protection enabled", Toast.LENGTH_SHORT).show()
+                } catch (_: IllegalArgumentException) {
+                    Toast.makeText(this, "Password or phrase too short", Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -840,145 +406,60 @@ class MainActivity : Activity() {
     }
 
     private fun checkRemoteConfig() {
-
         executor.execute {
-
-            var config: JSONObject? = null
-
             try {
-
-                val url = URL(
-                    "https://raw.githubusercontent.com/" +
-                    BuildConfig.GITHUB_REPO +
-                    "/main/config.json?t=" +
-                    System.currentTimeMillis()
-                )
-
-                val connection = url.openConnection()
-
-                connection.connectTimeout = 8000
-
-                connection.readTimeout = 8000
-
-                connection.useCaches = false
-
-                val json = connection
+                val jsonText = URL(BuildConfig.CONFIG_URL)
+                    .openConnection()
+                    .apply {
+                        connectTimeout = 8000
+                        readTimeout = 8000
+                        useCaches = false
+                    }
                     .getInputStream()
                     .bufferedReader()
-                    .use {
-                        it.readText()
+                    .use { it.readText() }
+
+                val obj = JSONObject(jsonText)
+                killed = obj.optBoolean("kill_switch", false)
+                minimumVersion = obj.optInt("min_version_code", 1)
+                updateUrl = obj.optString("update_url", "")
+
+                handler.post {
+                    if (killed) showBlocked("DexBrowse is disabled")
+                    else if (BuildConfig.VERSION_CODE < minimumVersion) {
+                        showBlocked("Update required")
                     }
-
-                config = JSONObject(json)
-
+                }
             } catch (_: Exception) {
-
-                // Preserve the existing local state.
-            }
-
-            handler.post {
-
-                config?.let {
-
-                    disabled = it.optBoolean(
-                        "kill_switch",
-                        disabled
-                    )
-
-                    minimumVersion = it.optInt(
-                        "min_version_code",
-                        minimumVersion
-                    )
-
-                    updateUrl = it.optString(
-                        "update_url",
-                        updateUrl
-                    )
-                }
-
-                when {
-
-                    disabled -> showDisabledScreen()
-
-                    BuildConfig.VERSION_CODE <
-                        minimumVersion -> showUpdateScreen()
-                }
+                // Network failures should be handled according to
+                // the app's configured offline-access policy.
             }
         }
     }
 
-    private fun showDisabledScreen() {
-
-        unlocked = false
-
+    private fun showBlocked(message: String) {
         root.removeAllViews()
+        root.addView(TextView(this).apply {
+            text = message
+            textSize = 24f
+            setPadding(30, 100, 30, 30)
+        })
 
-        root.addView(
-            TextView(this).apply {
-
-                text = "DexBrowse has been disabled."
-
-                textSize = 23f
-
-                gravity = Gravity.CENTER
-
-                setTextColor(Color.RED)
-            }
-        )
-    }
-
-    private fun showUpdateScreen() {
-
-        unlocked = false
-
-        root.removeAllViews()
-
-        root.addView(
-            TextView(this).apply {
-
-                text = "Update Required"
-
-                textSize = 25f
-
-                gravity = Gravity.CENTER
-
-                setTextColor(Color.WHITE)
-            }
-        )
-
-        root.addView(
-            button("DOWNLOAD UPDATE") {
-
-                if (updateUrl.startsWith("https://")) {
-
-                    startActivity(
-                        Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse(updateUrl)
-                        )
-                    )
-                }
-            }
-        )
+        if (!killed && updateUrl.startsWith("https://")) {
+            root.addView(button("Download Update") {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl)))
+            })
+        }
     }
 
     override fun onResume() {
-
         super.onResume()
-
-        checkRemoteConfig()
+        if (::security.isInitialized) checkRemoteConfig()
     }
 
     override fun onDestroy() {
-
-        tabs.forEach {
-            it.destroy()
-        }
-
-        tabs.clear()
-
+        tabs.forEach { it.destroy() }
         executor.shutdownNow()
-
         super.onDestroy()
     }
 }
