@@ -1,0 +1,11 @@
+{
+  "app_name": "DexBrowse By Fuad",
+  "kill_switch": false,
+  "kill_message": "DexBrowse has been disabled by Fuad.",
+  "min_version_code": 1,
+  "latest_version": "2.0.0",
+  "update_url": "https://github.com/itsfuad41/DexBrowse/releases/latest",
+  "default_home_url": "https://www.google.com",
+  "inactivity_lock_seconds": 180,
+  "blocked_domains": []
+}
