@@ -2,8 +2,11 @@ name: Build DexBrowse APK
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches:
+      - main
+    tags:
+      - "v*"
+
   workflow_dispatch:
 
 permissions:
@@ -14,39 +17,58 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v5
 
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Install Gradle
+      - name: Generate DexBrowse Project
         run: |
-          wget -q https://services.gradle.org/distributions/gradle-8.7-bin.zip -O /tmp/gradle.zip
+          python3 generate_project.py
+
+      - name: Install Gradle 8.7
+        run: |
+          wget -q \
+            https://services.gradle.org/distributions/gradle-8.7-bin.zip \
+            -O /tmp/gradle.zip
+
           unzip -q /tmp/gradle.zip -d /tmp
+
           echo "/tmp/gradle-8.7/bin" >> "$GITHUB_PATH"
 
       - name: Install Android SDK
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
 
       - name: Build APK
-        run: gradle clean assembleRelease --stacktrace
+        run: |
+          gradle clean assembleRelease --stacktrace
 
       - name: Verify APK
         run: |
-          test -f app/build/outputs/apk/release/app-release.apk
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "APK was not generated."
+            exit 1
+          fi
+
           mkdir -p output
-          cp app/build/outputs/apk/release/app-release.apk output/DexBrowse-By-Fuad.apk
+
+          cp "$APK" output/DexBrowse-By-Fuad.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DexBrowse-By-Fuad-APK
+          name: DexBrowse-APK
           path: output/DexBrowse-By-Fuad.apk
           if-no-files-found: error
 
