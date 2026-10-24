@@ -26,6 +26,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Require signing keystore
+        run: |
+          if [ ! -f keystore/dexbrowse.jks ]; then
+            echo "::error::keystore/dexbrowse.jks is missing from the repo. Without it every build gets a NEW random signing key and Android will say App not installed."
+            exit 1
+          fi
+
       - name: Generate DexBrowse Project
         run: |
           python3 generate_project.py
@@ -51,6 +58,11 @@ jobs:
       - name: Build APK
         run: |
           gradle clean assembleRelease --stacktrace
+
+      - name: Show APK signature
+        run: |
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs \
+            app/build/outputs/apk/release/app-release.apk | grep -E "SHA-256|Verifies" || true
 
       - name: Verify APK
         run: |
