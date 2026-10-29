@@ -71,8 +71,8 @@ android {
         applicationId = "com.fuad.dexbrowse"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "2.3.0"
+        versionCode = 22
+        versionName = "2.11.8"
 
         buildConfigField(
             "String",
@@ -113,6 +113,10 @@ android {
         jvmTarget = "17"
     }
 }
+
+dependencies {
+    implementation("androidx.webkit:webkit:1.18.0")
+}
 """)
 
 write("app/src/main/AndroidManifest.xml", """
@@ -120,6 +124,7 @@ write("app/src/main/AndroidManifest.xml", """
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="false"
@@ -209,11 +214,71 @@ class SecurityManager(context: Context) {
         Context.MODE_PRIVATE
     )
 
-    fun isProtected(): Boolean =
-        prefs.contains("password_hash")
+    data class Profile(val id: String, val name: String)
 
-    fun username(): String =
-        prefs.getString("username", "Guest") ?: "Guest"
+    companion object {
+        const val DEFAULT_PROFILE_ID = "Default"
+    }
+
+    init {
+        migrateLegacyProfile()
+    }
+
+    private fun profileIds(): MutableList<String> {
+        val ids = prefs.getString("profile_ids", null)
+        if (ids != null) {
+            return try {
+                val array = org.json.JSONArray(ids)
+                MutableList(array.length()) { array.getString(it) }
+            } catch (_: org.json.JSONException) {
+                mutableListOf()
+            }
+        }
+        return mutableListOf()
+    }
+
+    private fun saveProfileIds(ids: List<String>) {
+        prefs.edit()
+            .putString("profile_ids", org.json.JSONArray(ids).toString())
+            .apply()
+    }
+
+    private fun migrateLegacyProfile() {
+        if (profileIds().isNotEmpty() || !prefs.contains("password_hash")) return
+        val legacyKeys = arrayOf("password_salt", "password_hash", "recovery_salt", "recovery_hash")
+        val editor = prefs.edit()
+            .putString("profile_name.$DEFAULT_PROFILE_ID", prefs.getString("username", "Guest"))
+        legacyKeys.forEach { key ->
+            prefs.getString(key, null)?.let { editor.putString("$key.$DEFAULT_PROFILE_ID", it) }
+        }
+        editor.remove("username")
+            .remove("password_salt")
+            .remove("password_hash")
+            .remove("recovery_salt")
+            .remove("recovery_hash")
+            .putString("profile_ids", org.json.JSONArray(listOf(DEFAULT_PROFILE_ID)).toString())
+            .putString("active_profile", DEFAULT_PROFILE_ID)
+            .apply()
+    }
+
+    fun profiles(): List<Profile> =
+        profileIds().mapNotNull { id ->
+            prefs.getString("profile_name.$id", null)?.let { Profile(id, it) }
+        }
+
+    fun activeProfileId(): String =
+        prefs.getString("active_profile", DEFAULT_PROFILE_ID) ?: DEFAULT_PROFILE_ID
+
+    fun setActiveProfile(id: String) {
+        require(profileIds().contains(id)) { "Profile does not exist" }
+        prefs.edit().putString("active_profile", id).apply()
+    }
+
+    fun isProtected(profileId: String = activeProfileId()): Boolean =
+        prefs.contains("password_hash.$profileId")
+
+    fun username(profileId: String = activeProfileId()): String =
+        prefs.getString("profile_name.$profileId", "Guest") ?: "Guest"
 
     private fun derive(value: String, salt: ByteArray): ByteArray {
         val spec = PBEKeySpec(
@@ -230,16 +295,16 @@ class SecurityManager(context: Context) {
         }
     }
 
-    private fun saveSecret(key: String, value: String) {
+    private fun saveSecret(profileId: String, key: String, value: String) {
         val salt = ByteArray(16)
         SecureRandom().nextBytes(salt)
         prefs.edit()
             .putString(
-                key + "_salt",
+                "$key" + "_salt.$profileId",
                 Base64.encodeToString(salt, Base64.NO_WRAP)
             )
             .putString(
-                key + "_hash",
+                "$key" + "_hash.$profileId",
                 Base64.encodeToString(
                     derive(value, salt),
                     Base64.NO_WRAP
@@ -248,14 +313,14 @@ class SecurityManager(context: Context) {
             .apply()
     }
 
-    private fun verifySecret(key: String, value: String): Boolean {
+    private fun verifySecret(profileId: String, key: String, value: String): Boolean {
         return try {
             val salt = Base64.decode(
-                prefs.getString(key + "_salt", "") ?: "",
+                prefs.getString("$key" + "_salt.$profileId", "") ?: "",
                 Base64.NO_WRAP
             )
             val expected = Base64.decode(
-                prefs.getString(key + "_hash", "") ?: "",
+                prefs.getString("$key" + "_hash.$profileId", "") ?: "",
                 Base64.NO_WRAP
             )
             MessageDigest.isEqual(
@@ -267,30 +332,77 @@ class SecurityManager(context: Context) {
         }
     }
 
-    fun configure(
+    fun createProfile(
         name: String,
         password: String,
         recovery: String
-    ) {
+    ): String {
         require(name.isNotBlank())
-        require(password.length >= 8)
-        require(recovery.length >= 12)
+        require(password.isNotBlank())
+        require(isPasswordUnique(password)) { "Passcode is already used by another profile" }
+        val ids = profileIds()
+        val id = if (ids.isEmpty()) {
+            DEFAULT_PROFILE_ID
+        } else {
+            "profile_${java.util.UUID.randomUUID().toString().replace("-", "")}"
+        }
+        ids.add(id)
         prefs.edit()
-            .putString("username", name.take(60))
+            .putString("profile_name.$id", name.trim().take(60))
             .apply()
-        saveSecret("password", password)
-        saveSecret("recovery", recovery)
+        saveSecret(id, "password", password)
+        if (recovery.isNotBlank()) saveSecret(id, "recovery", recovery)
+        saveProfileIds(ids)
+        return id
     }
 
-    fun verifyPassword(value: String): Boolean =
-        verifySecret("password", value)
+    fun configure(name: String, password: String, recovery: String) {
+        val id = activeProfileId()
+        require(profileIds().contains(id))
+        require(name.isNotBlank())
+        require(password.isNotBlank())
+        require(isPasswordUnique(password, id)) { "Passcode is already used by another profile" }
+        prefs.edit().putString("profile_name.$id", name.trim().take(60)).apply()
+        saveSecret(id, "password", password)
+        if (recovery.isNotBlank()) {
+            saveSecret(id, "recovery", recovery)
+        }
+    }
 
-    fun verifyRecovery(value: String): Boolean =
-        verifySecret("recovery", value)
+    fun hasRecovery(profileId: String = activeProfileId()): Boolean =
+        prefs.contains("recovery_hash.$profileId")
 
-    fun resetPassword(value: String) {
-        require(value.length >= 8)
-        saveSecret("password", value)
+    fun verifyPassword(value: String, profileId: String = activeProfileId()): Boolean =
+        verifySecret(profileId, "password", value)
+
+    fun isPasswordUnique(value: String, exceptProfileId: String? = null): Boolean =
+        profiles().none { profile ->
+            profile.id != exceptProfileId && verifyPassword(value, profile.id)
+        }
+
+    fun verifyRecovery(value: String, profileId: String = activeProfileId()): Boolean =
+        verifySecret(profileId, "recovery", value)
+
+    fun resetPassword(value: String, profileId: String = activeProfileId()) {
+        require(value.isNotBlank())
+        require(isPasswordUnique(value, profileId)) { "Passcode is already used by another profile" }
+        saveSecret(profileId, "password", value)
+    }
+
+    fun deleteProfile(id: String): Boolean {
+        val ids = profileIds()
+        if (ids.size <= 1 || id !in ids) return false
+        val remaining = ids.filterNot { it == id }
+        val editor = prefs.edit()
+        prefs.all.keys
+            .filter { it == "profile_name.$id" || it.endsWith(".$id") }
+            .forEach(editor::remove)
+        editor.putString("profile_ids", org.json.JSONArray(remaining).toString())
+        if (activeProfileId() == id) {
+            editor.putString("active_profile", remaining.first())
+        }
+        editor.apply()
+        return true
     }
 }
 """)
@@ -382,10 +494,10 @@ package com.fuad.dexbrowse
 import android.content.Context
 import org.json.JSONArray
 
-class HistoryManager(context: Context) {
+class HistoryManager(context: Context, profileId: String = "Default") {
 
     private val prefs = context.getSharedPreferences(
-        "dexbrowse_history",
+        if (profileId == "Default") "dexbrowse_history" else "dexbrowse_history_$profileId",
         Context.MODE_PRIVATE
     )
 
@@ -462,6 +574,156 @@ class AdBlockManager {
 }
 """)
 
+write("app/src/main/java/com/fuad/dexbrowse/CredentialVault.kt", """
+package com.fuad.dexbrowse
+
+import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import org.json.JSONObject
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+class CredentialVault(context: Context, profileId: String = "Default") {
+
+    data class Credential(val username: String, val password: String)
+
+    private val prefs = context.getSharedPreferences(
+        if (profileId == "Default") "dexbrowse_credentials" else "dexbrowse_credentials_$profileId",
+        Context.MODE_PRIVATE
+    )
+    private val alias =
+        if (profileId == "Default") "dexbrowse_credentials_key"
+        else "dexbrowse_credentials_key_$profileId"
+
+    private fun key(): SecretKey {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(alias, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            "AndroidKeyStore"
+        )
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
+        return generator.generateKey()
+    }
+
+    private fun entries(): JSONObject {
+        val ivText = prefs.getString("iv", null) ?: return JSONObject()
+        val blobText = prefs.getString("blob", null) ?: return JSONObject()
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            key(),
+            GCMParameterSpec(128, Base64.decode(ivText, Base64.NO_WRAP))
+        )
+        return JSONObject(
+            String(
+                cipher.doFinal(Base64.decode(blobText, Base64.NO_WRAP)),
+                Charsets.UTF_8
+            )
+        )
+    }
+
+    private fun saveEntries(entries: JSONObject) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key())
+        val blob = cipher.doFinal(entries.toString().toByteArray(Charsets.UTF_8))
+        prefs.edit()
+            .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+            .putString("blob", Base64.encodeToString(blob, Base64.NO_WRAP))
+            .apply()
+    }
+
+    @Synchronized
+    fun save(origin: String, username: String, password: String) {
+        require(origin.startsWith("https://"))
+        require(username.isNotBlank() && password.isNotBlank())
+        val entries = entries()
+        entries.put(
+            origin,
+            JSONObject()
+                .put("username", username)
+                .put("password", password)
+        )
+        saveEntries(entries)
+    }
+
+    @Synchronized
+    fun saveIfChanged(origin: String, username: String, password: String): Boolean {
+        require(origin.startsWith("https://"))
+        require(username.isNotBlank() && password.isNotBlank())
+        val entries = entries()
+        val existing = entries.optJSONObject(origin)
+        if (
+            existing?.optString("username") == username &&
+            existing?.optString("password") == password
+        ) {
+            return false
+        }
+        entries.put(
+            origin,
+            JSONObject()
+                .put("username", username)
+                .put("password", password)
+        )
+        saveEntries(entries)
+        return true
+    }
+
+    @Synchronized
+    fun get(origin: String): Credential? {
+        val entry = entries().optJSONObject(origin) ?: return null
+        val username = entry.optString("username")
+        val password = entry.optString("password")
+        if (username.isBlank() || password.isBlank()) return null
+        return Credential(username, password)
+    }
+
+    @Synchronized
+    fun origins(): List<Pair<String, String>> {
+        val entries = entries()
+        return entries.keys().asSequence()
+            .map { it to entries.optJSONObject(it)?.optString("username").orEmpty() }
+            .toList()
+    }
+
+    @Synchronized
+    fun remove(origin: String) {
+        val entries = entries()
+        entries.remove(origin)
+        if (entries.length() == 0) {
+            prefs.edit().clear().apply()
+        } else {
+            saveEntries(entries)
+        }
+    }
+
+    @Synchronized
+    fun clear() {
+        prefs.edit().clear().apply()
+    }
+
+    fun deleteProfileData() {
+        prefs.edit().clear().apply()
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (store.containsAlias(alias)) store.deleteEntry(alias)
+    }
+}
+""")
+
 write("app/src/main/java/com/fuad/dexbrowse/MainActivity.kt", r'''
 package com.fuad.dexbrowse
 
@@ -471,32 +733,46 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.JavascriptInterface
+import android.view.inputmethod.InputMethodManager
 import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebResourceError
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.CheckBox
+import android.widget.ArrayAdapter
+import android.widget.AutoCompleteTextView
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import android.graphics.Typeface
+import androidx.webkit.ProfileStore
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
 import java.net.URL
 import java.util.concurrent.Executors
 
@@ -505,38 +781,53 @@ class MainActivity : Activity() {
     private class Tab(
         val web: WebView,
         var title: String = "DexBrowse Start",
-        var start: Boolean = true
+        var start: Boolean = true,
+        var zoom: Int = 100,
+        var autofillPromptedOrigin: String? = null,
+        var lastOnlineUrl: String? = null,
+        var isOfflinePage: Boolean = false,
+        var offlineFallbackAttempted: Boolean = false,
+        var restoreScrollY: Int = 0
     )
 
-    // ---------- palette (matches the screenshots) ----------
-    private val bg = Color.parseColor("#0B1220")
-    private val panel = Color.parseColor("#1E293B")
-    private val navBg = Color.parseColor("#27354B")
-    private val border = Color.parseColor("#3B4A63")
-    private val sky = Color.parseColor("#38BDF8")
+    private val isLightTheme: Boolean
+        get() = prefs.getString("theme", "dark") == "light"
+
+    private val bg: Int
+        get() = Color.parseColor(if (isLightTheme) "#F8FAFC" else "#0B1220")
+    private val panel: Int
+        get() = Color.parseColor(if (isLightTheme) "#E2E8F0" else "#1E293B")
+    private val navBg: Int
+        get() = Color.parseColor(if (isLightTheme) "#CBD5E1" else "#27354B")
+    private val border: Int
+        get() = Color.parseColor(if (isLightTheme) "#94A3B8" else "#3B4A63")
+    private val sky: Int
+        get() = Color.parseColor(if (isLightTheme) "#0369A1" else "#38BDF8")
     private val blue = Color.parseColor("#0284C7")
     private val wideOn = Color.parseColor("#0C6BA5")
-    private val purpleBg = Color.parseColor("#3B1F6E")
-    private val purple = Color.parseColor("#8B5CF6")
-    private val muted = Color.parseColor("#94A3B8")
+    private val purpleBg: Int
+        get() = Color.parseColor(if (isLightTheme) "#EDE9FE" else "#3B1F6E")
+    private val purple: Int
+        get() = Color.parseColor(if (isLightTheme) "#6D28D9" else "#8B5CF6")
+    private val muted: Int
+        get() = Color.parseColor(if (isLightTheme) "#475569" else "#94A3B8")
+    private val foregroundColor: Int
+        get() = Color.parseColor(if (isLightTheme) "#0F172A" else "#FFFFFF")
 
     private val matchP = ViewGroup.LayoutParams.MATCH_PARENT
     private val wrapC = ViewGroup.LayoutParams.WRAP_CONTENT
 
     private lateinit var security: SecurityManager
     private lateinit var history: HistoryManager
-    private lateinit var vault: PasswordVault
+    private lateinit var credentialVault: CredentialVault
     private val blocker = AdBlockManager()
 
     private lateinit var root: LinearLayout
     private lateinit var content: FrameLayout
-    private lateinit var address: EditText
-    private lateinit var tabStrip: LinearLayout
-    private lateinit var uaLabel: TextView
-    private lateinit var uaBtn: TextView
-    private lateinit var aiBtn: TextView
-    private lateinit var engineBtn: TextView
-    private lateinit var wideBtn: TextView
+    private lateinit var address: AutoCompleteTextView
+    private lateinit var addressAdapter: ArrayAdapter<String>
+    private lateinit var tabCountButton: TextView
+    private lateinit var tabsButton: FrameLayout
     private lateinit var aiPanel: LinearLayout
     private lateinit var aiTitle: TextView
     private var aiWeb: WebView? = null
@@ -544,6 +835,14 @@ class MainActivity : Activity() {
     private val tabs = mutableListOf<Tab>()
     private var activeTab = -1
     private var browserVisible = false
+    private var restoringSession = false
+    private var loginMessage: String? = null
+    private var wrongPasscodeAttempts = 0
+    private var guestMode = false
+    private var guestProfileId: String? = null
+    private val reusableGuestProfileId = "DexBrowseGuestDemo"
+    private val guestProfileRetentionMillis = 7L * 24 * 60 * 60 * 1000
+    private var guestUsageRecordedAt = 0L
 
     private var killed = false
     private var minVersion = 1
@@ -551,9 +850,21 @@ class MainActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
+    private var lockRunnable: Runnable? = null
+    private var lastInteractionAt = 0L
 
-    private val prefs by lazy {
-        getSharedPreferences("dexbrowse_settings", MODE_PRIVATE)
+    private val prefs: android.content.SharedPreferences
+        get() {
+        guestProfileId?.takeIf { guestMode }?.let { id ->
+            return getSharedPreferences("dexbrowse_guest_settings_$id", MODE_PRIVATE)
+        }
+        val profileId = security.activeProfileId()
+        val name = if (profileId == SecurityManager.DEFAULT_PROFILE_ID) {
+            "dexbrowse_settings"
+        } else {
+            "dexbrowse_settings_$profileId"
+        }
+        return getSharedPreferences(name, MODE_PRIVATE)
     }
 
     private val startBase = "https://dexbrowse.local"
@@ -562,6 +873,22 @@ class MainActivity : Activity() {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/131.0.0.0 Safari/537.36"
+
+    private val userAgents = linkedMapOf(
+        "Windows 10/11 · Chrome" to desktopUA,
+        "Mac · Safari" to
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+        "iPhone · iOS Safari" to
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
+                "Mobile/15E148 Safari/604.1",
+        "iPad · iPadOS Safari" to
+            "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) " +
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
+                "Mobile/15E148 Safari/604.1",
+        "Android · Default" to ""
+    )
 
     private val mobileUA by lazy { WebSettings.getDefaultUserAgent(this) }
 
@@ -580,59 +907,77 @@ class MainActivity : Activity() {
         "Microsoft Copilot" to "https://copilot.microsoft.com"
     )
 
-    // Start page, laid out at 1366px like a real desktop browser.
     private val startPage = """
 <!doctype html><html><head><meta charset="utf-8"><title>DexBrowse Start</title>
-<meta name="viewport" content="width=1366">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#0f172a,#0a0e1a);font-family:Segoe UI,Roboto,Arial,sans-serif;color:#e2e8f0}
-.box{width:620px;text-align:center}
-h1{margin:0;font-size:30px;color:#38bdf8}
-.sub{font-size:12.5px;color:#94a3b8;margin:4px 0 18px}
-.eng{display:flex;gap:8px;justify-content:center;margin-bottom:12px}
-.eng button{background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:20px;padding:5px 14px;font-size:12px}
-.eng button.on{background:#0284c7;color:#fff;border-color:#38bdf8;font-weight:700}
-form{display:flex}
-form input{flex:1;min-width:0;background:#0b1426;color:#e2e8f0;border:1px solid #334155;border-right:0;border-radius:8px 0 0 8px;padding:13px 16px;font-size:13px;outline:none}
-form button{background:#0284c7;color:#fff;border:0;border-radius:0 8px 8px 0;padding:0 26px;font-weight:700;font-size:13px}
-.row{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:16px}
-.row+.row{margin-top:10px}
-.row a{text-decoration:none;color:#e2e8f0;font-size:12px;padding:9px 16px;border-radius:8px;background:#1e293b;border:1px solid #334155}
-.row.ai a{background:#2a1b4e;border-color:#6d28d9}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--page);font-family:Arial,sans-serif;color:var(--text);padding:24px 18px}
+body.dark{--page:#0b1220;--text:#e2e8f0;--sub:#94a3b8;--input:#172338;--line:#334155;--card:#111c2d}
+body.light{--page:#f1f5f9;--text:#0f172a;--sub:#475569;--input:#fff;--line:#cbd5e1;--card:#fff}
+.box{width:min(520px,100%);text-align:center;padding:28px 20px;background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:0 16px 48px #0003}
+h1{margin:0;font-size:28px;color:#38bdf8}
+.subtitle{margin:8px 0 6px;font-size:14px;color:var(--sub)}
+.greeting{margin:0 0 22px;font-size:16px;color:var(--sub)}
+.name{border:0;background:none;color:#38bdf8;font:inherit;font-weight:700;padding:0}
+.engines{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:0 0 16px}
+.engine{background:var(--input);color:var(--text);border:1px solid var(--line);border-radius:999px;padding:9px 13px;font-size:13px}
+.engine.selected{background:#0284c7;border-color:#0284c7;color:#fff}
+form{display:flex;gap:8px}
+form input{flex:1;min-width:0;background:var(--input);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:14px;font-size:15px;outline:none}
+form button,.shortcut{background:#0284c7;color:#fff;border:0;border-radius:12px;padding:0 18px;font-weight:600;font-size:14px}
+.last{display:block;width:100%;margin-top:14px;background:var(--input);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:12px 16px;font-size:14px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.quick{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:20px}
+.shortcut{min-height:44px;padding:10px;background:#24344b;border:1px solid var(--line)}
+.shortcut.ai{background:#38215f}
+@media(max-width:360px){.box{padding:22px 14px}.engine{padding:8px 10px}}
 </style></head><body>
 <div class="box">
-<h1>🖥️ DexBrowse By Fuad</h1>
-<div class="sub">Windows 11 x64 Desktop Engine • Multi-Search &amp; DexAI Suite</div>
-<div class="eng" id="eng"></div>
-<form id="f"><input id="q" type="text" placeholder="Search the web or enter any PC website URL..." autocomplete="off"><button type="submit">Search</button></form>
-<div class="row ai">
-<a href="dexbrowse://ai">✨ Open DexAI Sidebar</a>
-<a href="https://www.perplexity.ai">🧠 Perplexity AI</a>
-<a href="https://chatgpt.com">🤖 ChatGPT</a>
-<a href="https://gemini.google.com">✦ Google Gemini</a>
+<h1>▣ DexBrowse By Fuad</h1>
+<div class="subtitle">A simple, private browser for your phone</div>
+<div class="greeting">Hello, <button id="name" class="name" onclick="location.href='dexbrowse://profile'">Guest</button></div>
+<div class="engines" id="engines">
+<button class="engine" data-engine="Google">Google</button>
+<button class="engine" data-engine="Bing">Bing</button>
+<button class="engine" data-engine="DuckDuckGo">DuckDuckGo</button>
+<button class="engine" data-engine="Brave">Brave</button>
+<button class="engine" data-engine="Perplexity">Perplexity</button>
 </div>
-<div class="row">
-<a href="https://www.youtube.com">▶ YouTube PC</a>
-<a href="https://github.com">🐙 GitHub</a>
-<a href="https://www.whatismybrowser.com/detect/what-is-my-user-agent/">🔍 Test My PC UA</a>
+<form id="f"><input id="q" type="text" placeholder="Search the web or enter a website..." autocomplete="off"><button type="submit">Search</button></form>
+<button id="last-site" class="last" type="button" hidden></button>
+<div class="quick">
+<button class="shortcut ai" onclick="location.href='dexbrowse://ai'">Open AI sidebar</button>
+<button class="shortcut ai" onclick="location.href='https://www.perplexity.ai'">Perplexity AI</button>
+<button class="shortcut" onclick="location.href='https://chatgpt.com'">ChatGPT</button>
+<button class="shortcut" onclick="location.href='https://gemini.google.com'">Google Gemini</button>
+<button class="shortcut" onclick="location.href='https://www.youtube.com'">YouTube</button>
+<button class="shortcut" onclick="location.href='https://github.com'">GitHub</button>
 </div>
 </div>
 <script>
-var sel='__SEL__';
-var map={Google:'Google',Bing:'Bing AI',DuckDuckGo:'DuckDuckGo',Brave:'Brave',Perplexity:'Perplexity AI'};
-var eng=document.getElementById('eng');
-Object.keys(map).forEach(function(k){
-  var b=document.createElement('button');
-  b.type='button';b.textContent=map[k];
-  if(k===sel)b.className='on';
-  b.onclick=function(){sel=k;[].forEach.call(eng.children,function(c){c.className=''});b.className='on'};
-  eng.appendChild(b);
+document.body.className='__THEME__';
+document.getElementById('name').textContent=__NAME__;
+var selectedEngine=__ENGINE__;
+document.querySelectorAll('[data-engine]').forEach(function(button){
+  button.classList.toggle('selected',button.dataset.engine===selectedEngine);
+  button.onclick=function(){
+    selectedEngine=button.dataset.engine;
+    document.querySelectorAll('[data-engine]').forEach(function(item){
+      item.classList.toggle('selected',item===button);
+    });
+  };
 });
+var lastSite=__LAST_SITE__;
+if(lastSite){
+  var lastButton=document.getElementById('last-site');
+  lastButton.hidden=false;
+  lastButton.textContent='↩ Continue where you left off · '+lastSite;
+  lastButton.onclick=function(){location.href='dexbrowse://open?url='+encodeURIComponent(lastSite);};
+}
 document.getElementById('f').onsubmit=function(e){
   e.preventDefault();
   var q=document.getElementById('q').value.trim();
-  if(q)location.href='dexbrowse://search?e='+encodeURIComponent(sel)+'&q='+encodeURIComponent(q);
+  if(q)location.href='dexbrowse://search?e='+encodeURIComponent(selectedEngine)+'&q='+encodeURIComponent(q);
 };
 </script></body></html>
 """
@@ -641,20 +986,27 @@ document.getElementById('f').onsubmit=function(e){
         super.onCreate(savedInstanceState)
 
         security = SecurityManager(this)
-        history = HistoryManager(this)
-        vault = PasswordVault(this)
-        blocker.enabled = prefs.getBoolean("adblock", true)
-
+        val guestCleanupPending = cleanupAbandonedGuestProfiles()
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        PasswordVault(this).clear()
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(bg)
         }
         setContentView(root)
 
-        if (security.isProtected()) {
-            showLock()
+        if (security.profiles().isEmpty()) {
+            showCreateProfile(firstProfile = true)
         } else {
-            showBrowser()
+            showProfileLogin()
+        }
+
+        if (guestCleanupPending) {
+            handler.postDelayed({
+                if (!isFinishing && cleanupAbandonedGuestProfiles()) {
+                    toast("Previous guest data is still in use; cleanup will retry next launch.", true)
+                }
+            }, 2000)
         }
 
         checkRemoteConfig()
@@ -687,7 +1039,7 @@ document.getElementById('f').onsubmit=function(e){
     private fun chip(label: String, fill: Int, stroke: Int, onClick: () -> Unit): TextView =
         TextView(this).apply {
             text = label
-            setTextColor(Color.WHITE)
+            setTextColor(foregroundColor)
             textSize = 14f
             gravity = Gravity.CENTER
             setSingleLine(true)
@@ -699,7 +1051,7 @@ document.getElementById('f').onsubmit=function(e){
     private fun field(hintText: String, secret: Boolean = false): EditText =
         EditText(this).apply {
             hint = hintText
-            setTextColor(Color.WHITE)
+            setTextColor(foregroundColor)
             setHintTextColor(muted)
             setSingleLine(true)
             if (secret) {
@@ -709,7 +1061,11 @@ document.getElementById('f').onsubmit=function(e){
         }
 
     private fun dialog(): AlertDialog.Builder =
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        AlertDialog.Builder(
+            this,
+            if (isLightTheme) android.R.style.Theme_Material_Light_Dialog_Alert
+            else android.R.style.Theme_Material_Dialog_Alert
+        )
 
     private fun toast(message: String, long: Boolean = false) {
         Toast.makeText(
@@ -719,132 +1075,345 @@ document.getElementById('f').onsubmit=function(e){
         ).show()
     }
 
+    @Suppress("DEPRECATION")
+    private fun updateSystemBars() {
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+        window.decorView.systemUiVisibility =
+            if (isLightTheme) {
+                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+                    View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            } else {
+                0
+            }
+    }
+
     // ---------- lock screen ----------
 
-    private fun showLock() {
+    private fun multiProfileSupported(): Boolean =
+        WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+
+    private fun cleanupAbandonedGuestProfiles(): Boolean {
+        if (!multiProfileSupported()) return false
+        var cleanupPending = false
+        val registry = getSharedPreferences("dexbrowse_guest_sessions", MODE_PRIVATE)
+        val profileIds = registry.getStringSet("profile_ids", emptySet()).orEmpty().toList()
+        profileIds.forEach { id ->
+            val lastUsedKey = "last_used_$id"
+            val lastUsed = registry.getLong(lastUsedKey, 0L)
+            if (lastUsed == 0L) {
+                registry.edit().putLong(lastUsedKey, System.currentTimeMillis()).apply()
+                return@forEach
+            }
+            if (System.currentTimeMillis() - lastUsed < guestProfileRetentionMillis) {
+                return@forEach
+            }
+            val store = ProfileStore.getInstance()
+            val profile = store.getProfile(id)
+            if (profile != null) {
+                val deleted = try {
+                    store.deleteProfile(id)
+                } catch (error: IllegalStateException) {
+                    if (error.message?.contains("in-use profile", ignoreCase = true) != true) {
+                        throw error
+                    }
+                    android.util.Log.w(
+                        "DexBrowse",
+                        "Deferring cleanup because a guest WebView profile is still in use"
+                    )
+                    false
+                }
+                if (!deleted) {
+                    cleanupPending = true
+                    return@forEach
+                }
+            }
+            if (!deleteOfflinePages(id)) {
+                cleanupPending = true
+                return@forEach
+            }
+            CredentialVault(this, id).deleteProfileData()
+            getSharedPreferences("dexbrowse_history_$id", MODE_PRIVATE).edit().clear().apply()
+            getSharedPreferences("dexbrowse_guest_settings_$id", MODE_PRIVATE).edit().clear().apply()
+            val remaining = registry.getStringSet("profile_ids", emptySet()).orEmpty().toMutableSet()
+            remaining.remove(id)
+            registry.edit()
+                .putStringSet("profile_ids", remaining)
+                .remove(lastUsedKey)
+                .apply()
+        }
+        return cleanupPending
+    }
+
+    private fun registerGuestProfile(id: String) {
+        val registry = getSharedPreferences("dexbrowse_guest_sessions", MODE_PRIVATE)
+        val ids = registry.getStringSet("profile_ids", emptySet()).orEmpty().toMutableSet()
+        ids.add(id)
+        guestUsageRecordedAt = System.currentTimeMillis()
+        registry.edit()
+            .putStringSet("profile_ids", ids)
+            .putLong("last_used_$id", guestUsageRecordedAt)
+            .apply()
+    }
+
+    private fun deleteOfflinePages(profileId: String): Boolean {
+        val safeProfileId = profileId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val directory = File(filesDir, "offline-pages/$safeProfileId")
+        return !directory.exists() || directory.deleteRecursively()
+    }
+
+    private fun recordGuestProfileUse(id: String) {
+        val now = System.currentTimeMillis()
+        if (now - guestUsageRecordedAt < 60_000L) return
+        val registry = getSharedPreferences("dexbrowse_guest_sessions", MODE_PRIVATE)
+        registry.edit().putLong("last_used_$id", now).apply()
+        guestUsageRecordedAt = now
+    }
+
+    private fun startGuestBrowser() {
+        if (!multiProfileSupported()) {
+            loginMessage = "Update Android System WebView to use a private guest browser"
+            showProfileLogin()
+            return
+        }
+        val id = reusableGuestProfileId
+        try {
+            destroyBrowserSession()
+            ProfileStore.getInstance().getOrCreateProfile(id)
+            registerGuestProfile(id)
+            guestProfileId = id
+            guestMode = true
+            setupProfileData()
+            loginMessage = null
+            wrongPasscodeAttempts = 0
+            lastInteractionAt = SystemClock.elapsedRealtime()
+            showBrowser()
+            toast("Guest browser opened. Its data is kept for 7 days after last use.")
+        } catch (error: Exception) {
+            guestProfileId = null
+            guestMode = false
+            loginMessage = "Could not start guest browser: ${error.localizedMessage ?: "WebView profile error"}"
+            showProfileLogin()
+        }
+    }
+
+    private fun finishGuestSession(showLogin: Boolean, closeApp: Boolean = false) {
+        val id = guestProfileId
+        if (id == null) {
+            guestMode = false
+            if (closeApp) finishAndRemoveTask()
+            else if (showLogin) showProfileLogin()
+            return
+        }
+        if (browserVisible) persistSession()
         browserVisible = false
+        lockRunnable?.let(handler::removeCallbacks)
+        lockRunnable = null
+        destroyBrowserSession()
+        try {
+            val registry = getSharedPreferences("dexbrowse_guest_sessions", MODE_PRIVATE)
+            val ids = registry.getStringSet("profile_ids", emptySet()).orEmpty().toMutableSet()
+            ids.add(id)
+            registry.edit()
+                .putStringSet("profile_ids", ids)
+                .putLong("last_used_$id", System.currentTimeMillis())
+                .apply()
+            guestUsageRecordedAt = System.currentTimeMillis()
+            guestMode = false
+            guestProfileId = null
+            wrongPasscodeAttempts = 0
+            if (showLogin && !closeApp) showProfileLogin()
+        } catch (error: Exception) {
+            guestMode = false
+            guestProfileId = null
+            loginMessage = "Guest session details could not be saved."
+            if (showLogin && !closeApp) showProfileLogin()
+            toast("Could not save guest session: ${error.localizedMessage ?: "storage error"}", true)
+        } finally {
+            if (closeApp) finishAndRemoveTask()
+        }
+    }
+
+    private fun setupProfileData() {
+        val profileId = if (guestMode) guestProfileId ?: error("Guest profile is missing")
+            else security.activeProfileId()
+        history = HistoryManager(this, profileId)
+        credentialVault = CredentialVault(this, profileId)
+        blocker.enabled = prefs.getBoolean("adblock", true)
+    }
+
+    private fun showProfileLogin() {
+        if (guestMode) {
+            finishGuestSession(showLogin = true)
+            return
+        }
+        if (browserVisible) persistSession()
+        browserVisible = false
+        lockRunnable?.let(handler::removeCallbacks)
+        lockRunnable = null
         root.removeAllViews()
+        root.setBackgroundColor(bg)
+        updateSystemBars()
         root.gravity = Gravity.CENTER
 
+        if (security.profiles().isEmpty()) {
+            showCreateProfile(firstProfile = true)
+            return
+        }
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(26), dp(30), dp(26), dp(26))
-            background = shape(panel, border, 28)
+            setPadding(dp(20), dp(22), dp(20), dp(18))
+            background = shape(panel, border, 20)
         }
 
         card.addView(TextView(this).apply {
-            text = "🖥️ DexBrowse By Fuad"
-            textSize = 24f
+            text = "DexBrowse"
+            textSize = 22f
             setTypeface(null, Typeface.BOLD)
             setTextColor(sky)
+            gravity = Gravity.CENTER
         })
 
         card.addView(
             TextView(this).apply {
-                text = "PC Browser + AI Edition • Enter password to open"
+                text = "Enter a profile passcode to continue"
                 textSize = 14f
                 gravity = Gravity.CENTER
-                setTextColor(Color.parseColor("#E2E8F0"))
+                setTextColor(foregroundColor)
             },
-            lp(matchP, wrapC, 0f, 0, 14, 0, 22)
+            lp(matchP, wrapC, 0f, 0, 8, 0, 10)
         )
 
-        val password = field("Device Password", true).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 20f
-            setPadding(dp(18), dp(16), dp(18), dp(16))
-            background = shape(Color.parseColor("#0B1426"), border, 18)
-        }
-        card.addView(password, lp(matchP, wrapC))
-
-        val remember = CheckBox(this).apply {
-            text = "Remember password on this device"
-            setTextColor(Color.parseColor("#CBD5E1"))
-            buttonTintList = ColorStateList.valueOf(sky)
-        }
-        card.addView(remember, lp(matchP, wrapC, 0f, 0, 10, 0, 4))
-
-        val saved = vault.load()
-        if (saved != null) {
-            password.setText(saved)
-            remember.isChecked = true
-        }
-
-        val unlock = TextView(this).apply {
-            text = "UNLOCK DEXBROWSE"
-            textSize = 16f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = shape(blue, blue, 18)
-            setOnClickListener { tryUnlock(password, remember) }
-        }
-        card.addView(unlock, lp(matchP, dp(58), 0f, 0, 12, 0, 0))
-
-        card.addView(
-            TextView(this).apply {
-                text = "Forgot Password?"
-                textSize = 14f
+        loginMessage?.let { message ->
+            card.addView(TextView(this).apply {
+                text = message
+                textSize = 12f
                 gravity = Gravity.CENTER
-                setTextColor(sky)
-                setPadding(dp(8), dp(8), dp(8), dp(8))
-                setOnClickListener { showRecovery() }
-            },
-            lp(matchP, wrapC, 0f, 0, 12, 0, 0)
-        )
+                setTextColor(if (message.startsWith("Incorrect")) Color.RED else muted)
+                setPadding(0, 0, 0, dp(10))
+            })
+        }
 
+        val passcode = field("Passcode", true)
+        card.addView(passcode, lp(matchP, wrapC, 0f, 0, 0, 0, 12))
+        card.addView(chip("Open browser", blue, blue) {
+            unlockMatchingProfile(passcode.text.toString())
+        })
         root.addView(card, lp(matchP, wrapC, 0f, 24, 0, 24, 0))
-    }
-
-    private fun tryUnlock(password: EditText, remember: CheckBox) {
-        val value = password.text.toString()
-        if (security.verifyPassword(value)) {
-            if (remember.isChecked) vault.save(value) else vault.clear()
-            showBrowser()
-        } else {
-            password.setText("")
-            toast("Incorrect password")
+        passcode.setOnEditorActionListener { _, _, _ ->
+            unlockMatchingProfile(passcode.text.toString())
+            true
         }
     }
 
-    private fun showRecovery() {
+    private fun unlockMatchingProfile(passcode: String) {
+        if (passcode.isBlank()) {
+            loginMessage = "Enter a passcode"
+            showProfileLogin()
+            return
+        }
+        val matchingProfiles = security.profiles().filter {
+            security.verifyPassword(passcode, it.id)
+        }
+        if (matchingProfiles.isEmpty()) {
+            wrongPasscodeAttempts++
+            if (wrongPasscodeAttempts >= 2) {
+                if (multiProfileSupported()) {
+                    startGuestBrowser()
+                    return
+                }
+                loginMessage = "Incorrect passcode twice. Update Android System WebView for a private guest browser."
+            } else {
+                loginMessage = "Incorrect passcode"
+            }
+            showProfileLogin()
+            return
+        }
+        val profile = matchingProfiles.firstOrNull { it.id == security.activeProfileId() }
+            ?: matchingProfiles.first()
+        if (profile.id != SecurityManager.DEFAULT_PROFILE_ID && !multiProfileSupported()) {
+            loginMessage = "Update Android System WebView to use this profile"
+            showProfileLogin()
+            return
+        }
+        try {
+            if (profile.id != SecurityManager.DEFAULT_PROFILE_ID) {
+                ProfileStore.getInstance().getOrCreateProfile(profile.id)
+            }
+            if (profile.id != security.activeProfileId()) {
+                destroyBrowserSession()
+            }
+            security.setActiveProfile(profile.id)
+            setupProfileData()
+            loginMessage = null
+            wrongPasscodeAttempts = 0
+            lastInteractionAt = SystemClock.elapsedRealtime()
+            showBrowser()
+        } catch (error: Exception) {
+            loginMessage = "Could not open profile: ${error.localizedMessage ?: "WebView profile error"}"
+            showProfileLogin()
+        }
+    }
+
+    private fun showCreateProfile(firstProfile: Boolean = false) {
+        if (security.profiles().isNotEmpty() && !multiProfileSupported()) {
+            toast("Update Android System WebView before adding isolated profiles", true)
+            return
+        }
+        val name = field("Profile name")
+        val passcode = field("Passcode (no minimum length)", true)
+        val recovery = field("Recovery phrase (optional)", true)
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
+            addView(name)
+            addView(passcode)
+            addView(recovery)
         }
-        val phrase = field("Recovery Phrase", true)
-        val password = field("New Password (8+ characters)", true)
-        box.addView(phrase)
-        box.addView(password)
-
         dialog()
-            .setTitle("Recover DexBrowse")
+            .setTitle(if (firstProfile) "Create your browser profile" else "Add profile")
+            .setMessage("Each profile has its own passcode, cookies, history, and saved logins.")
             .setView(box)
-            .setPositiveButton("Reset") { _, _ ->
-                if (
-                    security.verifyRecovery(phrase.text.toString()) &&
-                    password.text.length >= 8
-                ) {
-                    security.resetPassword(password.text.toString())
-                    vault.clear()
-                    toast("Password updated")
-                    showLock()
-                } else {
-                    toast("Recovery failed")
-                }
-            }
+            .setPositiveButton("Create", null)
             .setNegativeButton("Cancel", null)
             .show()
+            .also { prompt ->
+                prompt.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    try {
+                        val id = security.createProfile(
+                            name.text.toString(),
+                            passcode.text.toString(),
+                            recovery.text.toString()
+                        )
+                        if (firstProfile) security.setActiveProfile(id)
+                        prompt.dismiss()
+                        showProfileLogin()
+                    } catch (error: IllegalArgumentException) {
+                        toast(error.message ?: "Enter a profile name and a non-empty passcode", true)
+                    }
+                }
+            }
     }
 
     private fun lockNow() {
-        if (!security.isProtected()) {
-            toast("Set a password first")
-            configureProtection()
-            return
-        }
-        showLock()
+        lockRunnable?.let(handler::removeCallbacks)
+        lockRunnable = null
+        showProfileLogin()
         toast("Locked")
+    }
+
+    private fun destroyBrowserSession() {
+        tabs.forEach { tab ->
+            (tab.web.parent as? ViewGroup)?.removeView(tab.web)
+            tab.web.destroy()
+        }
+        tabs.clear()
+        activeTab = -1
+        aiWeb?.let { web ->
+            (web.parent as? ViewGroup)?.removeView(web)
+            web.destroy()
+        }
+        aiWeb = null
     }
 
     // ---------- browser screen ----------
@@ -852,112 +1421,132 @@ document.getElementById('f').onsubmit=function(e){
     private fun showBrowser() {
         browserVisible = true
         root.removeAllViews()
+        root.setBackgroundColor(bg)
+        updateSystemBars()
         root.gravity = Gravity.TOP
 
-        // header: title, UA label, AI / PC UA / Lock
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(10), dp(10), dp(10))
-            setBackgroundColor(bg)
-        }
-        header.addView(TextView(this).apply {
-            text = "🖥️ DexBrowse By Fuad"
-            textSize = 17f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(sky)
-            setSingleLine(true)
-            setOnClickListener { showSettings() }
-        })
-        uaLabel = TextView(this).apply {
-            textSize = 15f
-            setTextColor(muted)
-            setSingleLine(true)
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(dp(8), 0, dp(6), 0)
-        }
-        header.addView(uaLabel, lp(0, wrapC, 1f))
-        aiBtn = chip("✨ AI", purpleBg, purple) { toggleAi() }
-        uaBtn = chip("⚙ PC UA", panel, border) { togglePcUa() }
-        header.addView(aiBtn, lp(wrapC, wrapC, 0f, 3, 0, 3, 0))
-        header.addView(uaBtn, lp(wrapC, wrapC, 0f, 3, 0, 3, 0))
-        header.addView(chip("🔒 Lock", panel, border) { lockNow() }, lp(wrapC, wrapC, 0f, 3, 0, 0, 0))
-        root.addView(header)
-
-        // tab row
-        val tabRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(panel)
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-        tabStrip = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        tabRow.addView(
-            HorizontalScrollView(this).apply {
-                isHorizontalScrollBarEnabled = false
-                addView(tabStrip)
-            },
-            lp(0, wrapC, 1f)
-        )
-        tabRow.addView(TextView(this).apply {
-            text = "+"
-            textSize = 26f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(dp(16), 0, dp(16), 0)
-            setOnClickListener { addTab() }
-        })
-        root.addView(tabRow)
-
-        // navigation row
         val nav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(navBg)
-            setPadding(dp(4), dp(8), dp(6), dp(8))
-        }
-        fun icon(label: String, action: () -> Unit) = TextView(this).apply {
-            text = label
-            textSize = 20f
-            setTextColor(Color.WHITE)
             setPadding(dp(8), dp(6), dp(8), dp(6))
+        }
+        fun icon(
+            label: String,
+            description: String = label,
+            action: () -> Unit
+        ) = TextView(this).apply {
+            text = label
+            textSize = 21f
+            setTextColor(foregroundColor)
+            gravity = Gravity.CENTER
+            minimumWidth = dp(42)
+            minimumHeight = dp(48)
+            setPadding(dp(4), dp(6), dp(4), dp(6))
+            contentDescription = description
+            isFocusable = true
+            background = android.graphics.drawable.RippleDrawable(
+                ColorStateList.valueOf(blue),
+                shape(panel, border, 14),
+                null
+            )
             setOnClickListener { action() }
         }
-        nav.addView(icon("◀") { current()?.web?.let { if (it.canGoBack()) it.goBack() } })
-        nav.addView(icon("▶") { current()?.web?.let { if (it.canGoForward()) it.goForward() } })
-        nav.addView(icon("↻") { current()?.web?.reload() })
-        nav.addView(icon("🏠") { loadHome() })
 
-        engineBtn = chip("", bg, border) { showSearchEngines() }
-        nav.addView(engineBtn, lp(wrapC, wrapC, 0f, 4, 0, 4, 0))
-
-        address = field("").apply {
+        addressAdapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_dropdown_item_1line,
+            history.getAll()
+        )
+        address = AutoCompleteTextView(this).apply {
+            setTextColor(foregroundColor)
+            setHintTextColor(muted)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             textSize = 15f
             imeOptions = EditorInfo.IME_ACTION_GO
-            setPadding(dp(14), dp(9), dp(14), dp(9))
-            background = shape(bg, border, 14)
+            hint = "Search or enter website"
+            setPadding(dp(14), dp(7), dp(14), dp(7))
+            background = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            threshold = 1
+            setAdapter(addressAdapter)
             setOnEditorActionListener { _, _, _ ->
                 navigate(text.toString())
                 true
             }
+            setOnItemClickListener { _, _, position, _ ->
+                navigate(addressAdapter.getItem(position).orEmpty())
+            }
         }
-        nav.addView(address, lp(0, wrapC, 1f, 2, 0, 2, 0))
-
-        nav.addView(chip("Go", bg, border) { navigate(address.text.toString()) }, lp(wrapC, wrapC, 0f, 2, 0, 2, 0))
-        wideBtn = chip("", wideOn, sky) { toggleWide() }
-        nav.addView(wideBtn, lp(wrapC, wrapC, 0f, 2, 0, 0, 0))
+        val addressBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = shape(panel, border, 24)
+            setPadding(dp(8), 0, dp(6), 0)
+        }
+        addressBox.addView(TextView(this).apply {
+            text = "ⓘ"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setTextColor(muted)
+            contentDescription = "Site information"
+            setPadding(dp(4), dp(8), dp(8), dp(8))
+            setOnClickListener { showSiteInfo() }
+        })
+        addressBox.addView(address, LinearLayout.LayoutParams(0, wrapC, 1f))
+        nav.addView(addressBox, lp(matchP, wrapC, 1f))
         root.addView(nav)
 
-        // page area + DexAI sidebar panel
         content = FrameLayout(this)
         root.addView(content, lp(matchP, 0, 1f))
+
+        val bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(navBg)
+            setPadding(dp(4), dp(3), dp(4), dp(3))
+        }
+        bottomBar.addView(icon("⌂", "Home") { loadHome() }, lp(0, wrapC, 1f, 4))
+        bottomBar.addView(icon("☆", "Bookmarks") { showBookmarks() }, lp(0, wrapC, 1f, 4))
+        bottomBar.addView(icon("⌕", "Search") { focusAddressForSearch() }, lp(0, wrapC, 1f, 4))
+        tabsButton = FrameLayout(this).apply {
+            minimumHeight = dp(48)
+            contentDescription = "Show ${tabs.size} tabs"
+            isFocusable = true
+            background = android.graphics.drawable.RippleDrawable(
+                ColorStateList.valueOf(blue),
+                shape(panel, border, 14),
+                null
+            )
+            setOnClickListener { showTabs() }
+        }
+        tabsButton.addView(TextView(this).apply {
+            text = "▢"
+            textSize = 27f
+            gravity = Gravity.CENTER
+            setTextColor(foregroundColor)
+        }, FrameLayout.LayoutParams(matchP, matchP, Gravity.CENTER))
+        tabCountButton = TextView(this).apply {
+            text = "${tabs.size}"
+            textSize = 10f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(foregroundColor)
+            isClickable = false
+            isFocusable = false
+        }
+        tabsButton.addView(
+            tabCountButton,
+            FrameLayout.LayoutParams(matchP, matchP, Gravity.CENTER)
+        )
+        bottomBar.addView(tabsButton, lp(0, wrapC, 1f, 4))
+        bottomBar.addView(icon("⋮", "More options") { showSettings() }, lp(0, wrapC, 1f, 4))
+        root.addView(bottomBar)
 
         aiPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
+            layoutParams = lp(matchP, 0, 1f)
             setBackgroundColor(bg)
         }
         val aiBar = LinearLayout(this).apply {
@@ -969,7 +1558,7 @@ document.getElementById('f').onsubmit=function(e){
         aiTitle = TextView(this).apply {
             textSize = 15f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.WHITE)
+            setTextColor(foregroundColor)
             setPadding(dp(6), dp(6), dp(6), dp(6))
             setOnClickListener { chooseAi() }
         }
@@ -977,7 +1566,7 @@ document.getElementById('f').onsubmit=function(e){
         aiBar.addView(TextView(this).apply {
             text = "✕"
             textSize = 18f
-            setTextColor(Color.WHITE)
+            setTextColor(foregroundColor)
             setPadding(dp(12), dp(4), dp(12), dp(4))
             setOnClickListener { aiPanel.visibility = View.GONE }
         })
@@ -987,9 +1576,9 @@ document.getElementById('f').onsubmit=function(e){
         aiPanel.addView(sidebar, lp(matchP, 0, 1f))
         root.addView(aiPanel, lp(matchP, 0, 1f))
 
-        updateEngineUi()
-        updateToggles()
-
+        if (tabs.isEmpty()) {
+            restoreSession()
+        }
         if (tabs.isEmpty()) {
             activeTab = -1
             addTab()
@@ -997,10 +1586,12 @@ document.getElementById('f').onsubmit=function(e){
             renderTabs()
             showActiveTab()
         }
+        scheduleAutoLock()
     }
 
     private fun createAiWeb(): WebView {
         val web = WebView(this)
+        applyProfile(web)
         web.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -1008,6 +1599,24 @@ document.getElementById('f').onsubmit=function(e){
         web.webViewClient = WebViewClient()
         return web
     }
+
+    private fun applyProfile(web: WebView) {
+        val profileId = if (guestMode) guestProfileId ?: error("Guest profile is missing")
+            else security.activeProfileId()
+        if (profileId != SecurityManager.DEFAULT_PROFILE_ID) {
+            check(multiProfileSupported()) {
+                "This Android System WebView does not support isolated profiles"
+            }
+            WebViewCompat.setProfile(web, profileId)
+        }
+    }
+
+    private fun cookieManager(web: WebView): CookieManager =
+        if (!guestMode && security.activeProfileId() == SecurityManager.DEFAULT_PROFILE_ID) {
+            CookieManager.getInstance()
+        } else {
+            WebViewCompat.getProfile(web).cookieManager
+        }
 
     private fun toggleAi() {
         if (aiPanel.visibility == View.VISIBLE) {
@@ -1037,41 +1646,119 @@ document.getElementById('f').onsubmit=function(e){
     private fun engine(): String =
         prefs.getString("engine", "Google") ?: "Google"
 
-    private fun updateEngineUi() {
-        engineBtn.text = "🔍 ${engine()} ▾"
-        address.hint = "Search ${engine()} or enter URL"
+    private fun hasNetworkConnection(): Boolean {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return false
+        val network = connectivity.activeNetwork ?: return false
+        return connectivity.getNetworkCapabilities(network)
+            ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
     }
 
-    private fun updateToggles() {
-        val pc = prefs.getBoolean("pcua", true)
-        val wide = prefs.getBoolean("wide", true)
-        uaLabel.text = if (pc) "•  Windows 11 — Chrome 131" else "•  Android — Mobile Chrome"
-        uaBtn.alpha = if (pc) 1f else 0.55f
-        wideBtn.text = "1366px: " + if (wide) "ON" else "OFF"
-        wideBtn.background = shape(if (wide) wideOn else bg, if (wide) sky else border)
+    private fun offlineDirectory(): File {
+        val profileId = if (guestMode) {
+            guestProfileId ?: error("Guest profile is missing")
+        } else {
+            security.activeProfileId()
+        }
+        val safeProfileId = profileId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        return File(filesDir, "offline-pages/$safeProfileId")
+    }
+
+    private fun offlineArchiveFor(url: String): File? {
+        if (!url.startsWith("https://") && !url.startsWith("http://")) return null
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(url.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return File(offlineDirectory(), "$digest.mht")
+    }
+
+    private fun saveOfflineArchive(web: WebView, url: String) {
+        val archive = offlineArchiveFor(url) ?: return
+        try {
+            val directory = archive.parentFile
+                ?: throw IllegalStateException("Offline page storage path is invalid")
+            if (!directory.exists() && !directory.mkdirs()) {
+                throw IllegalStateException("Could not create offline page storage")
+            }
+            val temporary = File(directory, "${archive.name}.${System.nanoTime()}.mht")
+            web.saveWebArchive(temporary.absolutePath, false) { savedPath ->
+                val savedFile = savedPath?.let { File(it) } ?: temporary
+                if (!savedFile.isFile) {
+                    android.util.Log.w("DexBrowse", "WebView did not save an offline page")
+                    temporary.delete()
+                    return@saveWebArchive
+                }
+                try {
+                    if (savedFile != archive && !savedFile.renameTo(archive)) {
+                        savedFile.copyTo(archive, overwrite = true)
+                        if (!savedFile.delete()) {
+                            android.util.Log.w("DexBrowse", "Could not remove temporary offline archive")
+                        }
+                    }
+                } catch (error: java.io.IOException) {
+                    android.util.Log.e("DexBrowse", "Could not store offline page", error)
+                    savedFile.delete()
+                }
+            }
+        } catch (error: Exception) {
+            android.util.Log.e("DexBrowse", "Could not save offline page", error)
+        }
+    }
+
+    private fun openOfflineArchive(tab: Tab, url: String): Boolean {
+        val archive = offlineArchiveFor(url) ?: return false
+        if (!archive.isFile) return false
+        tab.lastOnlineUrl = url
+        tab.isOfflinePage = true
+        tab.offlineFallbackAttempted = true
+        tab.web.loadUrl(Uri.fromFile(archive).toString())
+        toast("Offline copy opened")
+        return true
+    }
+
+    private fun reloadCurrentPage() {
+        val tab = current() ?: return
+        tab.autofillPromptedOrigin = null
+        val url = tab.lastOnlineUrl
+        if (tab.isOfflinePage && hasNetworkConnection() && url != null) {
+            tab.offlineFallbackAttempted = false
+            tab.isOfflinePage = false
+            tab.web.loadUrl(url)
+        } else {
+            tab.web.reload()
+        }
     }
 
     private fun applyView(web: WebView) {
-        val pc = prefs.getBoolean("pcua", true)
+        val selectedAgent = prefs.getString("user_agent", null)
+            ?: if (prefs.getBoolean("pcua", true)) "Windows 10/11 · Chrome"
+            else "Android · Default"
         val wide = prefs.getBoolean("wide", true)
-        web.settings.userAgentString = if (pc) desktopUA else mobileUA
+        web.settings.userAgentString = userAgents[selectedAgent]
+            ?.takeIf { it.isNotEmpty() }
+            ?: if (selectedAgent == "Android · Default") mobileUA else desktopUA
         web.settings.useWideViewPort = wide
         web.settings.loadWithOverviewMode = wide
+        web.settings.setSupportZoom(true)
+        web.settings.builtInZoomControls = false
+        web.settings.displayZoomControls = false
+        web.setInitialScale(prefs.getInt("page_zoom", 100).coerceIn(50, 200))
     }
 
     private fun refreshViews() {
         tabs.forEach { applyView(it.web) }
-        updateToggles()
         current()?.let { if (it.start) loadStart(it.web) else it.web.reload() }
     }
 
-    private fun togglePcUa() {
-        prefs.edit().putBoolean("pcua", !prefs.getBoolean("pcua", true)).apply()
+    private fun setUserAgent(profile: String) {
+        prefs.edit()
+            .putString("user_agent", profile)
+            .putBoolean("pcua", profile != "Android · Default")
+            .apply()
         refreshViews()
     }
 
-    private fun toggleWide() {
-        prefs.edit().putBoolean("wide", !prefs.getBoolean("wide", true)).apply()
+    private fun setDesktopLayout(enabled: Boolean) {
+        prefs.edit().putBoolean("wide", enabled).apply()
         refreshViews()
     }
 
@@ -1083,9 +1770,23 @@ document.getElementById('f').onsubmit=function(e){
     private fun current(): Tab? = tabs.getOrNull(activeTab)
 
     private fun loadStart(web: WebView) {
+        val safeName = JSONObject.quote(displayName())
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        val lastVisited = history.getAll().firstOrNull()
+            ?.let { JSONObject.quote(it) }
+            ?.replace("<", "\\u003c")
+            ?.replace(">", "\\u003e")
+            ?.replace("&", "\\u0026")
+            ?: "null"
         web.loadDataWithBaseURL(
             "$startBase/",
-            startPage.replace("__SEL__", engine()),
+            startPage
+                .replace("__ENGINE__", JSONObject.quote(engine()))
+                .replace("__NAME__", safeName)
+                .replace("__LAST_SITE__", lastVisited)
+                .replace("__THEME__", if (isLightTheme) "light" else "dark"),
             "text/html",
             "UTF-8",
             null
@@ -1107,23 +1808,192 @@ document.getElementById('f').onsubmit=function(e){
     private fun handleInternal(uri: Uri) {
         when (uri.host) {
             "ai" -> openAi(prefs.getString("ai", "Perplexity AI") ?: "Perplexity AI")
+            "profile" -> changeDisplayName()
+            "open" -> uri.getQueryParameter("url")?.let(::navigate)
             "search" -> {
-                val chosen = uri.getQueryParameter("e") ?: "Google"
                 val query = uri.getQueryParameter("q") ?: return
-                if (searchEngines.containsKey(chosen)) {
+                val chosen = uri.getQueryParameter("e")
+                if (chosen != null && searchEngines.containsKey(chosen)) {
                     prefs.edit().putString("engine", chosen).apply()
-                    updateEngineUi()
                 }
                 navigate(query)
             }
         }
     }
 
-    private fun addTab(url: String? = null) {
-        val web = WebView(this)
+    private fun originOf(value: String?): String? {
+        val uri = value?.let(Uri::parse) ?: return null
+        val host = uri.host?.lowercase() ?: return null
+        if (uri.scheme != "https") return null
+        val port = if (uri.port == -1 || uri.port == 443) "" else ":${uri.port}"
+        return "https://$host$port"
+    }
 
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
+    private inner class CredentialBridge(private val web: WebView) {
+        @JavascriptInterface
+        fun offer(origin: String, username: String, password: String) {
+            if (!saveLoginsEnabled()) return
+            if (username.isBlank() || username.length > 512 || password.isBlank() || password.length > 2048) {
+                return
+            }
+            val submittedOrigin = originOf(origin) ?: return
+            handler.post {
+                if (originOf(web.url) != submittedOrigin || !saveLoginsEnabled()) {
+                    return@post
+                }
+                try {
+                    if (credentialVault.saveIfChanged(submittedOrigin, username, password)) {
+                        toast("Login saved securely for $submittedOrigin")
+                    }
+                } catch (error: Exception) {
+                    toast("Could not save login: ${error.localizedMessage ?: "storage error"}", true)
+                }
+            }
+        }
+    }
+
+    private fun saveLoginsEnabled(): Boolean =
+        !guestMode && prefs.getBoolean("save_logins", true)
+
+    private fun autoLoginEnabled(): Boolean =
+        prefs.getBoolean("autofill_logins", true)
+
+    private fun installLoginObserver(web: WebView) {
+        if (!saveLoginsEnabled() || originOf(web.url) == null) return
+        web.evaluateJavascript(
+            """
+            (function(){
+              if(window.__dexBrowseSaveHook)return;
+              window.__dexBrowseSaveHook=true;
+              document.addEventListener('submit',function(event){
+                var form=event.target;
+                if(!form||!form.querySelector)return;
+                var password=form.querySelector('input[type="password"]');
+                var username=form.querySelector('input[autocomplete="username"],input[type="email"],input[type="text"],input[type="tel"]');
+                if(password&&username&&username.value&&password.value){
+                  window.DexBrowseCredentials.offer(location.origin,username.value,password.value);
+                }
+              },true);
+            })();
+            """.trimIndent(),
+            null
+        )
+    }
+
+    private fun offerSavedLogin(web: WebView, origin: String) {
+        if (!autoLoginEnabled()) return
+        val tab = tabs.firstOrNull { it.web === web } ?: return
+        if (tab.autofillPromptedOrigin == origin) return
+        try {
+            if (credentialVault.get(origin) == null) return
+        } catch (error: Exception) {
+            toast("Could not read saved login: ${error.localizedMessage ?: "storage error"}", true)
+            return
+        }
+
+        tab.autofillPromptedOrigin = origin
+        web.evaluateJavascript(
+            """
+            (function(){
+              var passwords=document.querySelectorAll('input[type="password"]');
+              var user=document.querySelector('input[autocomplete="username"],input[type="email"],input[type="text"],input[type="tel"]');
+              return passwords.length===1&&!!user&&passwords[0].autocomplete!=='new-password';
+            })();
+            """.trimIndent(),
+            { hasPasswordField ->
+                if (hasPasswordField != "true" || originOf(web.url) != origin) return@evaluateJavascript
+                fillSavedLogin(origin, web, autoSubmit = true)
+            }
+        )
+    }
+
+    private fun refreshAddressSuggestions() {
+        if (!::addressAdapter.isInitialized) return
+        addressAdapter.clear()
+        addressAdapter.addAll(history.getAll())
+        addressAdapter.notifyDataSetChanged()
+    }
+
+    private fun fillSavedLogin(
+        origin: String? = originOf(current()?.web?.url),
+        targetWeb: WebView? = current()?.web,
+        autoSubmit: Boolean = false
+    ) {
+        val web = targetWeb ?: return
+        val currentOrigin = originOf(web.url)
+        if (currentOrigin == null || currentOrigin != origin) {
+            toast("Open the saved website before filling its login")
+            return
+        }
+        val credential = try {
+            credentialVault.get(currentOrigin)
+        } catch (error: Exception) {
+            toast("Could not read saved login: ${error.localizedMessage ?: "storage error"}", true)
+            return
+        }
+        if (credential == null) {
+            toast("No saved login for this website")
+            return
+        }
+        val username = JSONObject.quote(credential.username)
+        val password = JSONObject.quote(credential.password)
+        web.evaluateJavascript(
+            """
+            (function(){
+              var user=document.querySelector('input[autocomplete="username"],input[type="email"],input[type="text"],input[type="tel"]');
+              var passwords=document.querySelectorAll('input[type="password"]');
+              var pass=passwords.length===1?passwords[0]:null;
+              if(!user||!pass||pass.autocomplete==='new-password')return false;
+              var form=pass.form;
+              if($autoSubmit&&(!form||user.form!==form))return false;
+              function setValue(element,value){
+                var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+                setter.call(element,value);
+                element.dispatchEvent(new Event('input',{bubbles:true}));
+                element.dispatchEvent(new Event('change',{bubbles:true}));
+              }
+              setValue(user,$username);
+              setValue(pass,$password);
+              if($autoSubmit){
+                if(typeof form.requestSubmit==='function')form.requestSubmit();
+                else form.submit();
+                return 'submitted';
+              }
+              return true;
+            })();
+            """.trimIndent()
+        ) { result ->
+            if (result == "false") {
+                toast("Could not find login fields on this page")
+            } else if (autoSubmit && result == "\"submitted\"") {
+                toast("Signing in with saved login")
+            } else if (!autoSubmit) {
+                toast("Saved login filled")
+            }
+        }
+    }
+
+    private fun setAutofillLogins(enabled: Boolean) {
+        prefs.edit().putBoolean("autofill_logins", enabled).apply()
+        if (enabled) {
+            current()?.web?.let { web ->
+                originOf(web.url)?.let { offerSavedLogin(web, it) }
+            }
+        }
+        toast(if (enabled) "Automatic sign-in with saved logins enabled" else "Automatic sign-in with saved logins disabled")
+    }
+
+    private fun addTab(
+        url: String? = null,
+        restoreScrollY: Int = 0,
+        blankTab: Boolean = false
+    ) {
+        val web = WebView(this)
+        applyProfile(web)
+
+        val cookies = cookieManager(web)
+        cookies.setAcceptCookie(true)
+        cookies.setAcceptThirdPartyCookies(web, false)
 
         web.settings.apply {
             javaScriptEnabled = true
@@ -1132,6 +2002,9 @@ document.getElementById('f').onsubmit=function(e){
             setSupportMultipleWindows(true)
         }
         applyView(web)
+        if (saveLoginsEnabled()) {
+            web.addJavascriptInterface(CredentialBridge(web), "DexBrowseCredentials")
+        }
 
         web.webChromeClient = object : WebChromeClient() {
             override fun onCreateWindow(
@@ -1139,7 +2012,16 @@ document.getElementById('f').onsubmit=function(e){
                 isDialog: Boolean,
                 isUserGesture: Boolean,
                 resultMsg: android.os.Message?
-            ): Boolean = false
+            ): Boolean {
+                if (!isUserGesture || tabs.size >= 50) return false
+                val message = resultMsg ?: return false
+                val transport = message.obj as? WebView.WebViewTransport ?: return false
+                addTab(blankTab = true)
+                val popup = current()?.web ?: return false
+                transport.webView = popup
+                message.sendToTarget()
+                return true
+            }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
                 val tab = tabs.firstOrNull { it.web === view } ?: return
@@ -1163,6 +2045,9 @@ document.getElementById('f').onsubmit=function(e){
                 request: WebResourceRequest?
             ): Boolean {
                 val uri = request?.url ?: return false
+                if (request.isForMainFrame && request.hasGesture()) {
+                    tabs.firstOrNull { it.web === view }?.autofillPromptedOrigin = null
+                }
                 return when (uri.scheme) {
                     "dexbrowse" -> {
                         handleInternal(uri)
@@ -1173,6 +2058,30 @@ document.getElementById('f').onsubmit=function(e){
                 }
             }
 
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                val tab = tabs.firstOrNull { it.web === view }
+                if (tab != null && (url?.startsWith("https://") == true || url?.startsWith("http://") == true)) {
+                    tab.lastOnlineUrl = url
+                    tab.isOfflinePage = false
+                    tab.offlineFallbackAttempted = false
+                }
+                persistSession()
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame != true || view == null) return
+                val tab = tabs.firstOrNull { it.web === view } ?: return
+                if (tab.offlineFallbackAttempted || tab.isOfflinePage) return
+                val failedUrl = request.url.toString()
+                openOfflineArchive(tab, failedUrl)
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 val tab = tabs.firstOrNull { it.web === view } ?: return
@@ -1180,27 +2089,79 @@ document.getElementById('f').onsubmit=function(e){
                 tab.start = page.startsWith(startBase)
                 if (tab.start) {
                     tab.title = "DexBrowse Start"
-                } else {
+                    tab.isOfflinePage = false
+                } else if (page.startsWith("https://") || page.startsWith("http://")) {
+                    tab.lastOnlineUrl = page
+                    tab.isOfflinePage = false
+                    saveOfflineArchive(tab.web, page)
                     history.add(page)
+                } else {
+                    tab.isOfflinePage = page.startsWith("file://")
                 }
+                refreshAddressSuggestions()
                 renderTabs()
+                installLoginObserver(tab.web)
                 if (tab === current()) {
-                    address.setText(if (tab.start) "" else page)
+                    address.setText(if (tab.start) "" else tab.lastOnlineUrl ?: page)
+                    val origin = originOf(page)
+                    if (tab.autofillPromptedOrigin != origin) {
+                        tab.autofillPromptedOrigin = null
+                    }
+                    if (origin != null) offerSavedLogin(tab.web, origin)
                 }
+                if (tab.restoreScrollY > 0) {
+                    val scrollY = tab.restoreScrollY
+                    tab.restoreScrollY = 0
+                    tab.web.postDelayed({ tab.web.scrollTo(0, scrollY) }, 300)
+                }
+                persistSession()
             }
         }
 
-        val tab = Tab(web)
+        val tab = Tab(
+            web = web,
+            start = !blankTab,
+            zoom = prefs.getInt("page_zoom", 100).coerceIn(50, 200),
+            lastOnlineUrl = url,
+            restoreScrollY = restoreScrollY
+        )
+        val scaleDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val currentZoom = tab.zoom.coerceIn(50, 200)
+                    val targetZoom = (currentZoom * detector.scaleFactor)
+                        .toInt()
+                        .coerceIn(50, 200)
+                    if (targetZoom == currentZoom) return true
+                    web.zoomBy(targetZoom.toFloat() / currentZoom.toFloat())
+                    tab.zoom = targetZoom
+                    prefs.edit().putInt("page_zoom", targetZoom).apply()
+                    return true
+                }
+            }
+        )
+        web.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            false
+        }
         tabs.add(tab)
         activeTab = tabs.lastIndex
         renderTabs()
         showActiveTab()
 
-        if (url == null) {
+        if (blankTab) {
+            return
+        } else if (url == null) {
             loadHome()
         } else {
             tab.start = false
-            web.loadUrl(url)
+            val archive = offlineArchiveFor(url)
+            if (!hasNetworkConnection() && archive?.isFile == true) {
+                openOfflineArchive(tab, url)
+            } else {
+                web.loadUrl(url)
+            }
         }
     }
 
@@ -1212,12 +2173,14 @@ document.getElementById('f').onsubmit=function(e){
         if (tabs.isEmpty()) {
             activeTab = -1
             addTab()
+            persistSession()
             return
         }
         if (index < activeTab) activeTab--
         activeTab = activeTab.coerceIn(0, tabs.lastIndex)
         showActiveTab()
         renderTabs()
+        persistSession()
     }
 
     private fun showActiveTab() {
@@ -1228,52 +2191,48 @@ document.getElementById('f').onsubmit=function(e){
             tab.web,
             FrameLayout.LayoutParams(matchP, matchP)
         )
-        address.setText(if (tab.start) "" else tab.web.url ?: "")
+        address.setText(if (tab.start) "" else tab.lastOnlineUrl ?: tab.web.url ?: "")
     }
 
     private fun renderTabs() {
-        if (!::tabStrip.isInitialized) return
-        tabStrip.removeAllViews()
-        tabs.forEachIndexed { index, tab ->
-            val active = index == activeTab
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(14), dp(9), dp(8), dp(9))
-                background = shape(
-                    if (active) bg else panel,
-                    if (active) sky else border,
-                    14
-                )
-                setOnClickListener {
-                    activeTab = index
-                    showActiveTab()
-                    renderTabs()
-                }
-            }
-            row.addView(TextView(this).apply {
-                text = tab.title
-                textSize = 15f
-                setTextColor(Color.WHITE)
-                setSingleLine(true)
-                ellipsize = TextUtils.TruncateAt.END
-                maxWidth = dp(150)
-            })
-            row.addView(TextView(this).apply {
-                text = "✕"
-                textSize = 16f
-                setTextColor(Color.parseColor("#F87171"))
-                setPadding(dp(10), dp(2), dp(4), dp(2))
-                setOnClickListener { closeTab(index) }
-            })
-            tabStrip.addView(row, lp(wrapC, wrapC, 0f, 0, 0, 8, 0))
+        if (::tabCountButton.isInitialized) {
+            tabCountButton.text = "${tabs.size}"
+            tabsButton.contentDescription = "Show ${tabs.size} tabs"
         }
+    }
+
+    private fun focusAddressForSearch() {
+        if (!::address.isInitialized) return
+        address.requestFocus()
+        address.setSelection(address.text.length)
+        (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.showSoftInput(address, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun showSiteInfo() {
+        val url = current()?.let { it.lastOnlineUrl ?: it.web.url }
+        val uri = url?.let(Uri::parse)
+        val secure = uri?.scheme.equals("https", ignoreCase = true)
+        val host = uri?.host ?: "Start page"
+        val status = when {
+            uri == null -> "No website is open."
+            secure -> "Connection uses HTTPS."
+            uri.scheme.equals("http", ignoreCase = true) ->
+                "This connection is not encrypted."
+            else -> "This is a local browser page."
+        }
+        dialog()
+            .setTitle(host)
+            .setMessage(status)
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private fun navigate(value: String) {
         val text = value.trim()
         if (text.isBlank()) return
         val tab = current() ?: return
+        tab.autofillPromptedOrigin = null
 
         val url = when {
             text.startsWith("https://") -> text
@@ -1288,7 +2247,396 @@ document.getElementById('f').onsubmit=function(e){
         tab.web.loadUrl(url)
     }
 
+    private fun adjustZoom(change: Int) {
+        val tab = current() ?: return
+        val currentZoom = tab.zoom.coerceIn(50, 200)
+        val targetZoom = (currentZoom + if (change < 0) -10 else 10).coerceIn(50, 200)
+        if (targetZoom == currentZoom) {
+            toast("Page zoom limit reached")
+            return
+        }
+        tab.web.zoomBy(targetZoom.toFloat() / currentZoom.toFloat())
+        tab.zoom = targetZoom
+        prefs.edit().putInt("page_zoom", targetZoom).apply()
+        toast("Page zoom: $targetZoom%")
+    }
+
+    private fun showTabs() {
+        if (tabs.isEmpty()) return
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val scroller = android.widget.ScrollView(this).apply {
+            addView(list)
+        }
+        val prompt = dialog()
+            .setTitle("Open tabs")
+            .setView(scroller)
+            .setPositiveButton("New tab") { _, _ -> addTab() }
+            .setNegativeButton("Done", null)
+            .show()
+
+        tabs.forEachIndexed { index, tab ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val title = TextView(this).apply {
+                text = "${if (index == activeTab) "● " else ""}${tab.title}"
+                textSize = 15f
+                setTextColor(foregroundColor)
+                setSingleLine(true)
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+                setOnClickListener {
+                    activeTab = index
+                    showActiveTab()
+                    renderTabs()
+                    persistSession()
+                    prompt.dismiss()
+                }
+            }
+            row.addView(title, LinearLayout.LayoutParams(0, wrapC, 1f))
+            row.addView(TextView(this).apply {
+                text = "✕"
+                textSize = 18f
+                setTextColor(foregroundColor)
+                setPadding(dp(16), dp(10), dp(8), dp(10))
+                setOnClickListener {
+                    closeTab(index)
+                    prompt.dismiss()
+                    showTabs()
+                }
+            })
+            list.addView(row, LinearLayout.LayoutParams(matchP, wrapC))
+        }
+    }
+
+    private fun persistSession() {
+        if (restoringSession || !::security.isInitialized || tabs.isEmpty()) return
+        val savedTabs = org.json.JSONArray()
+        val savedScrollPositions = org.json.JSONArray()
+        tabs.forEach { tab ->
+            val url = if (tab.start) null else tab.lastOnlineUrl ?: tab.web.url
+            savedTabs.put(
+                if (url.isNullOrBlank()) {
+                    "start"
+                } else if (url.startsWith("https://") || url.startsWith("http://")) {
+                    url
+                } else {
+                    "start"
+                }
+            )
+            savedScrollPositions.put(tab.web.scrollY.coerceAtLeast(0))
+        }
+        prefs.edit()
+            .putString("session_tabs", savedTabs.toString())
+            .putString("session_scroll_positions", savedScrollPositions.toString())
+            .putInt("session_active_tab", activeTab.coerceIn(0, tabs.lastIndex))
+            .apply()
+    }
+
+    private fun restoreSession() {
+        if (tabs.isNotEmpty()) return
+        val encoded = prefs.getString("session_tabs", null) ?: return
+        val savedTabs = try {
+            org.json.JSONArray(encoded)
+        } catch (error: org.json.JSONException) {
+            prefs.edit().remove("session_tabs").remove("session_active_tab").apply()
+            toast("Could not restore saved tabs: ${error.localizedMessage ?: "invalid session"}", true)
+            return
+        }
+        val savedScrollPositions = try {
+            org.json.JSONArray(prefs.getString("session_scroll_positions", "[]"))
+        } catch (_: org.json.JSONException) {
+            org.json.JSONArray()
+        }
+        if (savedTabs.length() == 0) return
+
+        restoringSession = true
+        try {
+            for (index in 0 until minOf(savedTabs.length(), 50)) {
+                val url = savedTabs.optString(index)
+                val scrollY = savedScrollPositions.optInt(index, 0).coerceAtLeast(0)
+                if (url == "start") {
+                    addTab(restoreScrollY = scrollY)
+                } else if (url.startsWith("https://") || url.startsWith("http://")) {
+                    addTab(url, scrollY)
+                }
+            }
+        } finally {
+            restoringSession = false
+        }
+        if (tabs.isEmpty()) {
+            prefs.edit().remove("session_tabs").remove("session_active_tab").apply()
+            toast("Saved tabs could not be restored", true)
+            return
+        }
+        activeTab = prefs.getInt("session_active_tab", tabs.lastIndex)
+            .coerceIn(0, tabs.lastIndex)
+        showActiveTab()
+        renderTabs()
+    }
+
+    private fun displayName(): String =
+        if (guestMode) {
+            "Guest"
+        } else {
+            prefs.getString("display_name", null)?.takeIf { it.isNotBlank() }
+                ?: security.username()
+        }
+
+    private fun changeDisplayName() {
+        val input = field("Your name").apply { setText(displayName()) }
+        dialog()
+            .setTitle("Personalize your start page")
+            .setMessage("This name appears in your greeting.")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isBlank()) {
+                    toast("Enter a name")
+                } else {
+                    prefs.edit().putString("display_name", name.take(60)).apply()
+                    current()?.let { if (it.start) loadStart(it.web) }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooseTheme() {
+        val themes = arrayOf("Light", "Dark")
+        dialog()
+            .setTitle("Browser theme")
+            .setSingleChoiceItems(themes, if (isLightTheme) 0 else 1) { dialog, index ->
+                prefs.edit().putString("theme", if (index == 0) "light" else "dark").apply()
+                dialog.dismiss()
+                showBrowser()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooseUserAgent() {
+        val choices = userAgents.keys.toTypedArray()
+        val selectedAgent = prefs.getString("user_agent", null)
+            ?: if (prefs.getBoolean("pcua", true)) "Windows 10/11 · Chrome"
+            else "Android · Default"
+        dialog()
+            .setTitle("User agent")
+            .setSingleChoiceItems(choices, choices.indexOf(selectedAgent).coerceAtLeast(0)) { dialog, index ->
+                setUserAgent(choices[index])
+                dialog.dismiss()
+                toast("${choices[index]} user agent selected")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooseLockTimer() {
+        val minutes = intArrayOf(0, 1, 5, 15, 30)
+        val labels = arrayOf("Off", "1 minute", "5 minutes", "15 minutes", "30 minutes")
+        val selected = minutes.indexOf(prefs.getInt("lock_timeout_minutes", 0)).coerceAtLeast(0)
+        dialog()
+            .setTitle("Lock after inactivity")
+            .setSingleChoiceItems(labels, selected) { dialog, index ->
+                prefs.edit().putInt("lock_timeout_minutes", minutes[index]).apply()
+                dialog.dismiss()
+                scheduleAutoLock()
+                toast(if (minutes[index] == 0) "Automatic lock disabled" else "Locks after ${labels[index]} of inactivity")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun scheduleAutoLock() {
+        lockRunnable?.let(handler::removeCallbacks)
+        lockRunnable = null
+        if (!browserVisible || !security.isProtected()) return
+        val timeout = prefs.getInt("lock_timeout_minutes", 0)
+        if (timeout <= 0) return
+        if (lastInteractionAt == 0L) lastInteractionAt = SystemClock.elapsedRealtime()
+        val timeoutMs = timeout * 60_000L
+        val remaining = (timeoutMs - (SystemClock.elapsedRealtime() - lastInteractionAt)).coerceAtLeast(0L)
+        val task = Runnable {
+            if (!browserVisible) return@Runnable
+            if (SystemClock.elapsedRealtime() - lastInteractionAt >= timeoutMs) {
+                showProfileLogin()
+                toast("Browser locked after inactivity")
+            } else {
+                scheduleAutoLock()
+            }
+        }
+        lockRunnable = task
+        handler.postDelayed(task, remaining)
+    }
+
+    private fun showSavedLogins() {
+        val entries = try {
+            credentialVault.origins()
+        } catch (error: Exception) {
+            toast("Could not read saved logins: ${error.localizedMessage ?: "storage error"}", true)
+            return
+        }
+        if (entries.isEmpty()) {
+            dialog().setTitle("Saved website logins").setMessage("No logins saved yet. Sign in to an HTTPS website while automatic login saving is enabled.").setPositiveButton("OK", null).show()
+            return
+        }
+        val labels = entries.map { "${it.first} — ${it.second}" }.toTypedArray()
+        dialog()
+            .setTitle("Saved website logins")
+            .setItems(labels) { _, index ->
+                val origin = entries[index].first
+                dialog()
+                    .setTitle(origin)
+                    .setItems(arrayOf("Fill login on this page", "Remove saved login")) { _, action ->
+                        if (action == 0) {
+                            fillSavedLogin(origin)
+                        } else {
+                            try {
+                                credentialVault.remove(origin)
+                                toast("Saved login removed")
+                            } catch (error: Exception) {
+                                toast("Could not remove login: ${error.localizedMessage ?: "storage error"}", true)
+                            }
+                        }
+                    }
+                    .show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun setSaveLogins(enabled: Boolean) {
+        prefs.edit().putBoolean("save_logins", enabled).apply()
+        tabs.forEach { tab ->
+            if (enabled) {
+                tab.web.addJavascriptInterface(CredentialBridge(tab.web), "DexBrowseCredentials")
+            } else {
+                tab.web.removeJavascriptInterface("DexBrowseCredentials")
+            }
+            tab.web.reload()
+        }
+        toast(if (enabled) "Website login saving enabled" else "Website login saving disabled")
+    }
+
     // ---------- settings (tap the "DexBrowse By Fuad" title) ----------
+
+    private fun bookmarkEntries(): org.json.JSONArray {
+        val encoded = prefs.getString("bookmarks", "[]") ?: "[]"
+        return try {
+            org.json.JSONArray(encoded)
+        } catch (error: org.json.JSONException) {
+            toast("Could not read bookmarks: ${error.localizedMessage ?: "invalid data"}", true)
+            org.json.JSONArray()
+        }
+    }
+
+    private fun addCurrentBookmark() {
+        val tab = current() ?: return
+        val url = tab.lastOnlineUrl ?: tab.web.url
+        if (url == null || (!url.startsWith("https://") && !url.startsWith("http://"))) {
+            toast("Open a website before adding a bookmark")
+            return
+        }
+        val saved = org.json.JSONArray()
+        val existing = bookmarkEntries()
+        for (index in 0 until existing.length()) {
+            val entry = existing.optJSONObject(index) ?: continue
+            if (entry.optString("url") != url) saved.put(entry)
+        }
+        saved.put(
+            JSONObject()
+                .put("title", tab.title.ifBlank { url })
+                .put("url", url)
+        )
+        prefs.edit().putString("bookmarks", saved.toString()).apply()
+        toast("Bookmark saved")
+    }
+
+    private fun removeBookmark(url: String) {
+        val saved = org.json.JSONArray()
+        val existing = bookmarkEntries()
+        for (index in 0 until existing.length()) {
+            val entry = existing.optJSONObject(index) ?: continue
+            if (entry.optString("url") != url) saved.put(entry)
+        }
+        prefs.edit().putString("bookmarks", saved.toString()).apply()
+    }
+
+    private fun showBookmarks() {
+        val entries = bookmarkEntries()
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val scroller = android.widget.ScrollView(this).apply {
+            addView(list)
+        }
+        if (entries.length() == 0) {
+            list.addView(TextView(this).apply {
+                text = "No bookmarks yet. Open a page and choose “Bookmark this page”."
+                textSize = 14f
+                setTextColor(muted)
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+            })
+        }
+        val prompt = dialog()
+            .setTitle("Bookmarks")
+            .setView(scroller)
+            .setPositiveButton("Bookmark current page") { _, _ -> addCurrentBookmark() }
+            .setNegativeButton("Close", null)
+            .show()
+
+        for (index in 0 until entries.length()) {
+            val entry = entries.optJSONObject(index) ?: continue
+            val titleText = entry.optString("title").ifBlank { entry.optString("url") }
+            val url = entry.optString("url")
+            if (!url.startsWith("https://") && !url.startsWith("http://")) continue
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(TextView(this).apply {
+                text = titleText
+                textSize = 15f
+                setTextColor(foregroundColor)
+                setSingleLine(true)
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+                setOnClickListener {
+                    navigate(url)
+                    prompt.dismiss()
+                }
+            }, LinearLayout.LayoutParams(0, wrapC, 1f))
+            row.addView(TextView(this).apply {
+                text = "×"
+                textSize = 22f
+                setTextColor(muted)
+                setContentDescription("Remove bookmark")
+                setPadding(dp(16), dp(8), dp(8), dp(8))
+                setOnClickListener {
+                    removeBookmark(url)
+                    prompt.dismiss()
+                    showBookmarks()
+                }
+            })
+            list.addView(row, LinearLayout.LayoutParams(matchP, wrapC))
+        }
+    }
+
+    private fun showExtensionsInfo() {
+        dialog()
+            .setTitle("Extensions")
+            .setMessage(
+                "Android System WebView does not support browser extensions. " +
+                    "Extensions from the Chrome Web Store or other browser stores " +
+                    "cannot be installed or managed in DexBrowse."
+            )
+            .setPositiveButton("OK", null)
+            .show()
+    }
 
     private fun showHistory() {
         val items = history.getAll()
@@ -1311,33 +2659,204 @@ document.getElementById('f').onsubmit=function(e){
     }
 
     private fun showSettings() {
-        val options = arrayOf(
+        val options = if (guestMode) {
+            arrayOf(
+                "Home",
+                "Reload",
+                "Zoom in",
+                "Zoom out",
+                "Browsing history",
+                "Bookmarks",
+                "Bookmark this page",
+                "Extensions",
+                "Exit guest browser"
+            )
+        } else arrayOf(
+            "Home",
+            "Reload",
+            "Zoom in",
+            "Zoom out",
             "History",
             "Search Engine",
-            "Ad Blocking: " + if (blocker.enabled) "ON" else "OFF",
             "Homepage",
-            "Password & Lock",
-            "Forget Saved Password",
-            "About DexBrowse"
+            "User Agent",
+            "Desktop page layout: " + if (prefs.getBoolean("wide", true)) "ON" else "OFF",
+            "Theme: " + if (isLightTheme) "Light" else "Dark",
+            "Auto-lock timer",
+            "Save website logins automatically: " + if (saveLoginsEnabled()) "ON" else "OFF",
+            "Automatically sign in with saved logins: " + if (autoLoginEnabled()) "ON" else "OFF",
+            "Manage saved logins",
+            "Lock browser",
+            "Manage current profile",
+            "Add profile",
+            "Profile name & passcode",
+            "Ad Blocking: " + if (blocker.enabled) "ON" else "OFF",
+            "DexAI",
+            "About DexBrowse",
+            "Bookmarks",
+            "Bookmark this page",
+            "Extensions"
         )
 
         dialog()
             .setTitle("DexBrowse Settings")
             .setItems(options) { _, index ->
-                when (index) {
-                    0 -> showHistory()
-                    1 -> showSearchEngines()
-                    2 -> toggleAdBlock()
-                    3 -> changeHomepage()
-                    4 -> configureProtection()
-                    5 -> {
-                        vault.clear()
-                        toast("Saved password removed")
+                if (guestMode) {
+                    when (index) {
+                        0 -> loadHome()
+                        1 -> reloadCurrentPage()
+                        2 -> adjustZoom(10)
+                        3 -> adjustZoom(-10)
+                        4 -> showHistory()
+                        5 -> showBookmarks()
+                        6 -> addCurrentBookmark()
+                        7 -> showExtensionsInfo()
+                        8 -> finishGuestSession(showLogin = false, closeApp = true)
                     }
-                    6 -> showAbout()
+                } else when (index) {
+                    0 -> loadHome()
+                    1 -> reloadCurrentPage()
+                    2 -> adjustZoom(10)
+                    3 -> adjustZoom(-10)
+                    4 -> showHistory()
+                    5 -> showSearchEngines()
+                    6 -> changeHomepage()
+                    7 -> chooseUserAgent()
+                    8 -> setDesktopLayout(!prefs.getBoolean("wide", true))
+                    9 -> chooseTheme()
+                    10 -> chooseLockTimer()
+                    11 -> setSaveLogins(!saveLoginsEnabled())
+                    12 -> setAutofillLogins(!autoLoginEnabled())
+                    13 -> showSavedLogins()
+                    14 -> lockNow()
+                    15 -> showProfileManagement()
+                    16 -> showCreateProfile()
+                    17 -> configureProtection()
+                    18 -> toggleAdBlock()
+                    19 -> toggleAi()
+                    20 -> showAbout()
+                    21 -> showBookmarks()
+                    22 -> addCurrentBookmark()
+                    23 -> showExtensionsInfo()
                 }
             }
             .show()
+    }
+
+    private fun showProfileManagement() {
+        val activeProfile = security.profiles().firstOrNull {
+            it.id == security.activeProfileId()
+        }
+        if (activeProfile == null) {
+            toast("The unlocked profile could not be found", true)
+            return
+        }
+        val actions = if (security.profiles().size > 1) {
+            arrayOf("Change name or passcode", "Delete this profile")
+        } else {
+            arrayOf("Change name or passcode")
+        }
+        dialog()
+            .setTitle("Manage ${activeProfile.name}")
+            .setItems(actions) { _, index ->
+                if (index == 0) {
+                    configureProtection()
+                } else {
+                    confirmProfileDeletion(activeProfile)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun confirmProfileDeletion(profile: SecurityManager.Profile) {
+        val passcode = field("Profile passcode", true)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(passcode)
+        }
+        val prompt = dialog()
+            .setTitle("Verify ${profile.name}")
+            .setMessage("Enter this profile's passcode to continue.")
+            .setView(box)
+            .setPositiveButton("Continue", null)
+            .setNegativeButton("Cancel", null)
+            .show()
+        prompt.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            if (!security.verifyPassword(passcode.text.toString(), profile.id)) {
+                passcode.setText("")
+                passcode.error = "Incorrect passcode"
+                return@setOnClickListener
+            }
+            prompt.dismiss()
+            dialog()
+                .setTitle("Delete ${profile.name}?")
+                .setMessage("This permanently removes this profile and its saved browser data.")
+                .setPositiveButton("Delete") { _, _ -> deleteProfile(profile) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun deleteProfile(profile: SecurityManager.Profile) {
+        if (profile.id != security.activeProfileId()) {
+            toast("You can only delete the currently unlocked profile", true)
+            return
+        }
+        if (security.profiles().size <= 1) {
+            toast("Keep at least one profile")
+            return
+        }
+        val deletingActiveProfile = profile.id == security.activeProfileId()
+        if (deletingActiveProfile) {
+            if (browserVisible) persistSession()
+            if (profile.id == SecurityManager.DEFAULT_PROFILE_ID) {
+                tabs.forEach { it.web.clearCache(true) }
+            }
+            browserVisible = false
+            destroyBrowserSession()
+        }
+
+        try {
+            if (profile.id == SecurityManager.DEFAULT_PROFILE_ID) {
+                CookieManager.getInstance().removeAllCookies(null)
+                CookieManager.getInstance().flush()
+                WebStorage.getInstance().deleteAllData()
+            } else {
+                if (!multiProfileSupported()) {
+                    if (deletingActiveProfile) showBrowser()
+                    toast("Update Android System WebView before deleting this profile", true)
+                    return
+                }
+                if (!ProfileStore.getInstance().deleteProfile(profile.id)) {
+                    if (deletingActiveProfile) showBrowser()
+                    toast("Android System WebView could not remove this profile", true)
+                    return
+                }
+            }
+
+            CredentialVault(this, profile.id).deleteProfileData()
+            check(deleteOfflinePages(profile.id)) { "Offline pages could not be removed" }
+            val historyName = if (profile.id == SecurityManager.DEFAULT_PROFILE_ID) {
+                "dexbrowse_history"
+            } else {
+                "dexbrowse_history_${profile.id}"
+            }
+            val settingsName = if (profile.id == SecurityManager.DEFAULT_PROFILE_ID) {
+                "dexbrowse_settings"
+            } else {
+                "dexbrowse_settings_${profile.id}"
+            }
+            getSharedPreferences(historyName, MODE_PRIVATE).edit().clear().apply()
+            getSharedPreferences(settingsName, MODE_PRIVATE).edit().clear().apply()
+            check(security.deleteProfile(profile.id)) { "Profile could not be removed" }
+            if (deletingActiveProfile) showProfileLogin()
+            toast("Profile deleted")
+        } catch (error: Exception) {
+            if (deletingActiveProfile) showBrowser()
+            toast("Could not delete profile: ${error.localizedMessage ?: "storage error"}", true)
+        }
     }
 
     private fun showSearchEngines() {
@@ -1348,7 +2867,6 @@ document.getElementById('f').onsubmit=function(e){
                 prefs.edit()
                     .putString("engine", names[index])
                     .apply()
-                updateEngineUi()
                 current()?.let { if (it.start) loadStart(it.web) }
             }
             .show()
@@ -1394,43 +2912,41 @@ document.getElementById('f').onsubmit=function(e){
             setPadding(dp(20), dp(8), dp(20), 0)
         }
 
-        val username = field("Username")
-        val password = field("Password (8+ characters)", true)
-        val recovery = field("Recovery Phrase (12+ characters)", true)
-        val remember = CheckBox(this).apply {
-            text = "Remember password on this device"
-            setTextColor(Color.WHITE)
-            buttonTintList = ColorStateList.valueOf(sky)
-            isChecked = vault.isRemembered()
-        }
+        val username = field("Profile name").apply { setText(security.username()) }
+        val password = field("New passcode (no minimum length)", true)
+        val recovery = field("Recovery phrase (optional)", true)
 
         box.addView(username)
         box.addView(password)
         box.addView(recovery)
-        box.addView(remember)
 
-        dialog()
-            .setTitle(if (security.isProtected()) "Change Password" else "Enable Password Protection")
+        val prompt = dialog()
+            .setTitle("Profile security")
+            .setMessage("A passcode is required, but there is no minimum length. Leave recovery blank to keep the existing phrase.")
             .setView(box)
-            .setPositiveButton("Save") { _, _ ->
-                try {
-                    security.configure(
-                        username.text.toString(),
-                        password.text.toString(),
-                        recovery.text.toString()
-                    )
-                    if (remember.isChecked) {
-                        vault.save(password.text.toString())
-                    } else {
-                        vault.clear()
-                    }
-                    toast("Protection enabled")
-                } catch (_: IllegalArgumentException) {
-                    toast("Check username, password and recovery phrase", true)
-                }
-            }
+            .setPositiveButton("Save", null)
             .setNegativeButton("Cancel", null)
             .show()
+        prompt.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            try {
+                if (username.text.isBlank() || password.text.isBlank()) {
+                    toast("Enter a profile name and a non-empty passcode")
+                    return@setOnClickListener
+                }
+                security.configure(
+                    username.text.toString(),
+                    password.text.toString(),
+                    recovery.text.toString()
+                )
+                prefs.edit()
+                    .putString("display_name", username.text.toString().trim().take(60))
+                    .apply()
+                toast("Profile updated")
+                prompt.dismiss()
+            } catch (error: Exception) {
+                toast(error.message ?: "Could not update profile", true)
+            }
+        }
     }
 
     private fun showAbout() {
@@ -1484,12 +3000,14 @@ document.getElementById('f').onsubmit=function(e){
     private fun showBlocked(message: String) {
         browserVisible = false
         root.removeAllViews()
+        root.setBackgroundColor(bg)
+        updateSystemBars()
         root.gravity = Gravity.CENTER
 
         root.addView(TextView(this).apply {
             text = message
             textSize = 24f
-            setTextColor(Color.WHITE)
+            setTextColor(foregroundColor)
             gravity = Gravity.CENTER
             setPadding(dp(24), dp(24), dp(24), dp(24))
         })
@@ -1532,20 +3050,87 @@ document.getElementById('f').onsubmit=function(e){
     }
 
     override fun onPause() {
-        CookieManager.getInstance().flush()
+        if (browserVisible) {
+            tabs.forEach { tab ->
+                tab.lastOnlineUrl?.takeIf {
+                    !tab.start && !tab.isOfflinePage &&
+                        (it.startsWith("https://") || it.startsWith("http://"))
+                }?.let { saveOfflineArchive(tab.web, it) }
+            }
+            persistSession()
+        }
+        if (::security.isInitialized) {
+            if (guestMode) {
+                guestProfileId?.let { id ->
+                    ProfileStore.getInstance().getProfile(id)?.cookieManager?.flush()
+                }
+            } else if (security.activeProfileId() == SecurityManager.DEFAULT_PROFILE_ID) {
+                CookieManager.getInstance().flush()
+            } else if (multiProfileSupported()) {
+                ProfileStore.getInstance()
+                    .getProfile(security.activeProfileId())
+                    ?.cookieManager
+                    ?.flush()
+            }
+        }
         super.onPause()
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        if (browserVisible) {
+            lastInteractionAt = SystemClock.elapsedRealtime()
+            if (guestMode) {
+                guestProfileId?.let(::recordGuestProfileUse)
+            }
+            scheduleAutoLock()
+        }
     }
 
     override fun onResume() {
         super.onResume()
         if (::security.isInitialized) {
+            if (
+                browserVisible &&
+                security.isProtected() &&
+                prefs.getInt("lock_timeout_minutes", 0) > 0 &&
+                lastInteractionAt > 0L &&
+                SystemClock.elapsedRealtime() - lastInteractionAt >=
+                    prefs.getInt("lock_timeout_minutes", 0) * 60_000L
+            ) {
+                showProfileLogin()
+                toast("Browser locked after inactivity")
+            }
+            scheduleAutoLock()
             checkRemoteConfig()
         }
     }
 
+    override fun onStop() {
+        if (browserVisible && !isChangingConfigurations) {
+            tabs.forEach { tab ->
+                tab.lastOnlineUrl?.takeIf {
+                    !tab.start && !tab.isOfflinePage &&
+                        (it.startsWith("https://") || it.startsWith("http://"))
+                }?.let { saveOfflineArchive(tab.web, it) }
+            }
+            persistSession()
+        }
+        super.onStop()
+        if (browserVisible && !isChangingConfigurations) {
+            if (guestMode) {
+                finishGuestSession(showLogin = false, closeApp = true)
+            } else {
+                showProfileLogin()
+            }
+        }
+    }
+
     override fun onDestroy() {
-        tabs.forEach { it.web.destroy() }
-        aiWeb?.destroy()
+        if (browserVisible) persistSession()
+        if (guestMode) finishGuestSession(showLogin = false)
+        lockRunnable?.let(handler::removeCallbacks)
+        destroyBrowserSession()
         executor.shutdownNow()
         super.onDestroy()
     }
