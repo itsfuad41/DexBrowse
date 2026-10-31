@@ -71,8 +71,8 @@ android {
         applicationId = "com.fuad.dexbrowse"
         minSdk = 26
         targetSdk = 34
-        versionCode = 22
-        versionName = "2.11.8"
+        versionCode = 23
+        versionName = "2.12.0"
 
         buildConfigField(
             "String",
@@ -126,17 +126,38 @@ write("app/src/main/AndroidManifest.xml", """
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Chromium capabilities: camera / microphone (WebRTC), location, downloads -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+
     <application
         android:allowBackup="false"
+        android:hardwareAccelerated="true"
         android:icon="@drawable/ic_launcher"
         android:label="DexBrowse"
         android:theme="@style/Theme.DexBrowse"
         android:usesCleartextTraffic="false">
 
+        <meta-data
+            android:name="android.webkit.WebView.EnableSafeBrowsing"
+            android:value="true" />
+
         <activity
             android:name="com.fuad.dexbrowse.MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
             android:windowSoftInputMode="adjustResize">
 
             <intent-filter>
@@ -727,9 +748,19 @@ class CredentialVault(context: Context, profileId: String = "Default") {
 write("app/src/main/java/com/fuad/dexbrowse/MainActivity.kt", r'''
 package com.fuad.dexbrowse
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.DownloadManager
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Environment
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
+import android.webkit.URLUtil
+import android.webkit.ValueCallback
+import androidx.webkit.WebSettingsCompat
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -832,6 +863,20 @@ class MainActivity : Activity() {
     private lateinit var aiTitle: TextView
     private var aiWeb: WebView? = null
 
+    // Chromium capability state (file chooser, permissions, fullscreen, downloads)
+    private val reqFileChooser = 7101
+    private val reqWebPermissions = 7102
+    private val reqGeolocation = 7103
+    private val reqStorage = 7104
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingWebPermission: PermissionRequest? = null
+    private var pendingGeoOrigin: String? = null
+    private var pendingGeoCallback: GeolocationPermissions.Callback? = null
+    private var pendingDownload: Array<String?>? = null
+    private var customView: View? = null
+    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    private var externalFlowInProgress = false
+
     private val tabs = mutableListOf<Tab>()
     private var activeTab = -1
     private var browserVisible = false
@@ -869,13 +914,76 @@ class MainActivity : Activity() {
 
     private val startBase = "https://dexbrowse.local"
 
+    // The real Chromium major version of the installed WebView engine, so the
+    // desktop user agent always matches the engine that is actually running.
+    private val chromiumMajor: String = detectChromiumMajor()
+
+    private fun detectChromiumMajor(): String {
+        val raw = try {
+            WebView.getCurrentWebViewPackage()?.versionName
+        } catch (_: Throwable) {
+            null
+        }
+        val major = raw?.substringBefore('.')
+        return if (major != null && major.isNotEmpty() && major.all { it.isDigit() }) {
+            major
+        } else {
+            "131"
+        }
+    }
+
     private val desktopUA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/131.0.0.0 Safari/537.36"
+            "Chrome/${chromiumMajor}.0.0.0 Safari/537.36"
 
     private val userAgents = linkedMapOf(
         "Windows 10/11 · Chrome" to desktopUA,
+        "Windows 11 · Edge" to
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/${chromiumMajor}.0.0.0 Safari/537.36 Edg/${chromiumMajor}.0.0.0",
+        "Windows 10/11 · Firefox" to
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) " +
+                "Gecko/20100101 Firefox/133.0",
+        "Windows 10/11 · Opera" to
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/${chromiumMajor}.0.0.0 Safari/537.36 OPR/115.0.0.0",
+        "Windows 10/11 · Vivaldi" to
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/${chromiumMajor}.0.0.0 Safari/537.36 Vivaldi/7.0",
+        "Windows 7 · Chrome" to
+            "Mozilla/5.0 (Windows NT 6.1; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/109.0.0.0 Safari/537.36",
+        "Mac · Chrome" to
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/${chromiumMajor}.0.0.0 Safari/537.36",
+        "Mac · Firefox" to
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) " +
+                "Gecko/20100101 Firefox/133.0",
+        "Mac · Edge" to
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/${chromiumMajor}.0.0.0 Safari/537.36 Edg/${chromiumMajor}.0.0.0",
+        "Linux · Chrome" to
+            "Mozilla/5.0 (X11; Linux x86_64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/${chromiumMajor}.0.0.0 Safari/537.36",
+        "Linux · Firefox" to
+            "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) " +
+                "Gecko/20100101 Firefox/133.0",
+        "Ubuntu · Chromium" to
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu " +
+                "Chromium/${chromiumMajor}.0.0.0 Chrome/${chromiumMajor}.0.0.0 Safari/537.36",
+        "ChromeOS · Chrome" to
+            "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/${chromiumMajor}.0.0.0 Safari/537.36",
         "Mac · Safari" to
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
@@ -887,10 +995,26 @@ class MainActivity : Activity() {
             "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) " +
                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
                 "Mobile/15E148 Safari/604.1",
+        "iPhone · Chrome" to
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) " +
+                "CriOS/${chromiumMajor}.0.0.0 Mobile/15E148 Safari/604.1",
+        "Android · Firefox" to
+            "Mozilla/5.0 (Android 14; Mobile; rv:133.0) Gecko/133.0 Firefox/133.0",
+        "Android · Samsung Internet" to
+            "Mozilla/5.0 (Linux; Android 14; SAMSUNG SM-S918B) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "SamsungBrowser/26.0 Chrome/${chromiumMajor}.0.0.0 Mobile Safari/537.36",
         "Android · Default" to ""
     )
 
-    private val mobileUA by lazy { WebSettings.getDefaultUserAgent(this) }
+    // Chrome-style mobile UA: drop the WebView-only markers ("; wv", "Version/4.0")
+    // so sites treat DexBrowse like regular Chrome for Android.
+    private val mobileUA by lazy {
+        WebSettings.getDefaultUserAgent(this)
+            .replace("; wv", "")
+            .replace(" Version/4.0", "")
+    }
 
     private val searchEngines = linkedMapOf(
         "Google" to "https://www.google.com/search?q=",
@@ -1592,12 +1716,249 @@ document.getElementById('f').onsubmit=function(e){
     private fun createAiWeb(): WebView {
         val web = WebView(this)
         applyProfile(web)
+        applyChromiumCapabilities(web)
+        web.webChromeClient = CapabilityChromeClient()
+        web.webViewClient = WebViewClient()
+        return web
+    }
+
+    // ---------- Chromium capabilities ----------
+
+    // Everything the Chromium engine can do that a bare WebView leaves switched
+    // off: media autoplay, geolocation, safe browsing, Chrome-like request
+    // headers and file downloads.
+    private fun applyChromiumCapabilities(web: WebView) {
         web.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            mediaPlaybackRequiresUserGesture = false
+            setGeolocationEnabled(true)
+            allowContentAccess = true
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
-        web.webViewClient = WebViewClient()
-        return web
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+            // Stop sending X-Requested-With: com.fuad.dexbrowse like a plain WebView does.
+            WebSettingsCompat.setRequestedWithHeaderOriginAllowList(web.settings, emptySet())
+        }
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+            WebSettingsCompat.setSafeBrowsingEnabled(web.settings, true)
+        }
+        web.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            startDownload(web, url, userAgent, contentDisposition, mimeType)
+        }
+    }
+
+    private fun startDownload(
+        web: WebView,
+        url: String?,
+        userAgent: String?,
+        contentDisposition: String?,
+        mimeType: String?
+    ) {
+        if (url.isNullOrBlank()) return
+        if (guestMode) {
+            toast("Downloads are disabled in the guest browser", true)
+            return
+        }
+        val scheme = Uri.parse(url).scheme?.lowercase()
+        if (scheme != "http" && scheme != "https") {
+            toast("This kind of download is not supported", true)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingDownload = arrayOf(url, userAgent, contentDisposition, mimeType)
+            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), reqStorage)
+            return
+        }
+        try {
+            val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+            val request = DownloadManager.Request(Uri.parse(url)).apply {
+                if (!mimeType.isNullOrBlank()) setMimeType(mimeType)
+                cookieManager(web).getCookie(url)?.let { addRequestHeader("Cookie", it) }
+                if (!userAgent.isNullOrBlank()) addRequestHeader("User-Agent", userAgent)
+                setTitle(fileName)
+                setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                )
+                setDestinationInExternalPublicDirectory(Environment.DIRECTORY_DOWNLOADS, fileName)
+            }
+            (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+            toast("Downloading $fileName")
+        } catch (error: Exception) {
+            toast("Download failed: ${error.localizedMessage ?: "unknown error"}", true)
+        }
+    }
+
+    private fun enterFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) {
+        if (customView != null) {
+            callback.onCustomViewHidden()
+            return
+        }
+        customView = view
+        customViewCallback = callback
+        (window.decorView as FrameLayout).addView(
+            view,
+            FrameLayout.LayoutParams(matchP, matchP)
+        )
+        hideSystemBarsForFullscreen()
+    }
+
+    private fun exitFullscreen() {
+        val view = customView ?: return
+        (view.parent as? ViewGroup)?.removeView(view)
+        customView = null
+        customViewCallback?.onCustomViewHidden()
+        customViewCallback = null
+        updateSystemBars()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hideSystemBarsForFullscreen() {
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+    }
+
+    private fun hasPermission(permission: String): Boolean =
+        checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+
+    // Chromium web permission prompts: camera, microphone (WebRTC / getUserMedia),
+    // DRM-protected media (EME) and MIDI. Android runtime permissions are
+    // requested only after the user allows the site.
+    private fun handleWebPermission(request: PermissionRequest) {
+        val wanted = request.resources.toList()
+        val labels = mutableListOf<String>()
+        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in wanted) labels += "camera"
+        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in wanted) labels += "microphone"
+        if (PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID in wanted) labels += "protected media"
+        if (PermissionRequest.RESOURCE_MIDI_SYSEX in wanted) labels += "MIDI devices"
+        if (labels.isEmpty()) {
+            request.deny()
+            return
+        }
+        val host = request.origin?.host ?: "This site"
+        dialog()
+            .setTitle("Allow access?")
+            .setMessage("$host wants to use your ${labels.joinToString(" and ")}.")
+            .setPositiveButton("Allow") { _, _ ->
+                val missing = mutableListOf<String>()
+                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in wanted &&
+                    !hasPermission(Manifest.permission.CAMERA)
+                ) missing += Manifest.permission.CAMERA
+                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in wanted &&
+                    !hasPermission(Manifest.permission.RECORD_AUDIO)
+                ) missing += Manifest.permission.RECORD_AUDIO
+                if (missing.isEmpty()) {
+                    request.grant(request.resources)
+                } else {
+                    pendingWebPermission?.deny()
+                    pendingWebPermission = request
+                    requestPermissions(missing.toTypedArray(), reqWebPermissions)
+                }
+            }
+            .setNegativeButton("Block") { _, _ -> request.deny() }
+            .setOnCancelListener { request.deny() }
+            .show()
+    }
+
+    private fun handleGeolocation(origin: String, callback: GeolocationPermissions.Callback) {
+        val host = Uri.parse(origin).host ?: origin
+        dialog()
+            .setTitle("Share your location?")
+            .setMessage("$host wants to know your location.")
+            .setPositiveButton("Allow") { _, _ ->
+                if (hasPermission(Manifest.permission.ACCESS_FINE_LOCATION) ||
+                    hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                ) {
+                    callback.invoke(origin, true, false)
+                } else {
+                    pendingGeoCallback?.invoke(pendingGeoOrigin, false, false)
+                    pendingGeoOrigin = origin
+                    pendingGeoCallback = callback
+                    requestPermissions(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        ),
+                        reqGeolocation
+                    )
+                }
+            }
+            .setNegativeButton("Block") { _, _ -> callback.invoke(origin, false, false) }
+            .setOnCancelListener { callback.invoke(origin, false, false) }
+            .show()
+    }
+
+    // Shared Chromium client used by every tab and by the AI sidebar.
+    private open inner class CapabilityChromeClient : WebChromeClient() {
+
+        override fun onPermissionRequest(request: PermissionRequest?) {
+            val req = request ?: return
+            runOnUiThread { handleWebPermission(req) }
+        }
+
+        override fun onPermissionRequestCanceled(request: PermissionRequest?) {
+            if (pendingWebPermission === request) pendingWebPermission = null
+        }
+
+        override fun onGeolocationPermissionsShowPrompt(
+            origin: String?,
+            callback: GeolocationPermissions.Callback?
+        ) {
+            if (origin == null || callback == null) return
+            runOnUiThread { handleGeolocation(origin, callback) }
+        }
+
+        override fun onShowFileChooser(
+            webView: WebView?,
+            filePathCallback: ValueCallback<Array<Uri>>?,
+            fileChooserParams: WebChromeClient.FileChooserParams?
+        ): Boolean {
+            val callback = filePathCallback ?: return false
+            fileChooserCallback?.onReceiveValue(null)
+            fileChooserCallback = callback
+            val intent = try {
+                fileChooserParams?.createIntent()
+            } catch (_: Exception) {
+                null
+            }
+            if (intent == null) {
+                fileChooserCallback = null
+                callback.onReceiveValue(null)
+                return false
+            }
+            externalFlowInProgress = true
+            return try {
+                @Suppress("DEPRECATION")
+                startActivityForResult(intent, reqFileChooser)
+                true
+            } catch (_: Exception) {
+                externalFlowInProgress = false
+                fileChooserCallback = null
+                callback.onReceiveValue(null)
+                toast("No app available to choose files", true)
+                true
+            }
+        }
+
+        override fun onShowCustomView(
+            view: View?,
+            callback: WebChromeClient.CustomViewCallback?
+        ) {
+            if (view == null || callback == null) return
+            enterFullscreen(view, callback)
+        }
+
+        override fun onHideCustomView() {
+            exitFullscreen()
+        }
     }
 
     private fun applyProfile(web: WebView) {
@@ -1995,9 +2356,8 @@ document.getElementById('f').onsubmit=function(e){
         cookies.setAcceptCookie(true)
         cookies.setAcceptThirdPartyCookies(web, false)
 
+        applyChromiumCapabilities(web)
         web.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
             javaScriptCanOpenWindowsAutomatically = false
             setSupportMultipleWindows(true)
         }
@@ -2006,7 +2366,7 @@ document.getElementById('f').onsubmit=function(e){
             web.addJavascriptInterface(CredentialBridge(web), "DexBrowseCredentials")
         }
 
-        web.webChromeClient = object : WebChromeClient() {
+        web.webChromeClient = object : CapabilityChromeClient() {
             override fun onCreateWindow(
                 view: WebView?,
                 isDialog: Boolean,
@@ -3030,7 +3390,76 @@ document.getElementById('f').onsubmit=function(e){
     // ---------- lifecycle ----------
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == reqFileChooser) {
+            externalFlowInProgress = false
+            val callback = fileChooserCallback
+            fileChooserCallback = null
+            callback?.onReceiveValue(
+                if (resultCode == RESULT_OK) {
+                    WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+                } else {
+                    null
+                }
+            )
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        externalFlowInProgress = false
+        when (requestCode) {
+            reqWebPermissions -> {
+                val request = pendingWebPermission
+                pendingWebPermission = null
+                if (request != null) {
+                    val granted = request.resources.filter { resource ->
+                        when (resource) {
+                            PermissionRequest.RESOURCE_VIDEO_CAPTURE ->
+                                hasPermission(Manifest.permission.CAMERA)
+                            PermissionRequest.RESOURCE_AUDIO_CAPTURE ->
+                                hasPermission(Manifest.permission.RECORD_AUDIO)
+                            else -> true
+                        }
+                    }
+                    if (granted.isEmpty()) request.deny()
+                    else request.grant(granted.toTypedArray())
+                }
+            }
+            reqGeolocation -> {
+                val callback = pendingGeoCallback
+                val origin = pendingGeoOrigin
+                pendingGeoCallback = null
+                pendingGeoOrigin = null
+                val ok = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION) ||
+                    hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                callback?.invoke(origin, ok, false)
+            }
+            reqStorage -> {
+                val saved = pendingDownload
+                pendingDownload = null
+                if (saved != null && hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                    current()?.web?.let {
+                        startDownload(it, saved[0], saved[1], saved[2], saved[3])
+                    }
+                } else if (saved != null) {
+                    toast("Storage permission is needed to save downloads", true)
+                }
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
+        if (customView != null) {
+            exitFullscreen()
+            return
+        }
         if (browserVisible) {
             val ai = aiWeb
             if (::aiPanel.isInitialized &&
@@ -3107,6 +3536,12 @@ document.getElementById('f').onsubmit=function(e){
     }
 
     override fun onStop() {
+        // A file picker or a system permission dialog sends the app to the
+        // background for a moment; that must not lock the browser.
+        if (externalFlowInProgress) {
+            super.onStop()
+            return
+        }
         if (browserVisible && !isChangingConfigurations) {
             tabs.forEach { tab ->
                 tab.lastOnlineUrl?.takeIf {
