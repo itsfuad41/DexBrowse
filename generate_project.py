@@ -2218,7 +2218,7 @@ document.getElementById('f').onsubmit=function(e){
                 setNotificationVisibility(
                     DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
                 )
-                setDestinationInExternalPublicDirectory(Environment.DIRECTORY_DOWNLOADS, fileName)
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
             }
             (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
             toast("Downloading $fileName")
