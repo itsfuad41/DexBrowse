@@ -57,6 +57,11 @@ jobs:
             "build-tools;34.0.0"
 
       - name: Build APK
+        env:
+          DEXBROWSE_GOOGLE_CLIENT_ID: ${{ secrets.DEXBROWSE_GOOGLE_CLIENT_ID }}
+          DEXBROWSE_GOOGLE_CLIENT_SECRET: ${{ secrets.DEXBROWSE_GOOGLE_CLIENT_SECRET }}
+          DEXBROWSE_FIREBASE_API_KEY: ${{ secrets.DEXBROWSE_FIREBASE_API_KEY }}
+          DEXBROWSE_FIREBASE_PROJECT_ID: ${{ secrets.DEXBROWSE_FIREBASE_PROJECT_ID }}
         run: |
           gradle clean assembleRelease --stacktrace
 

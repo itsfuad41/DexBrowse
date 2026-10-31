@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; frame-src 'self' file: http: https:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DexBrowse By Fuad</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="tabbar">
+    <div id="tabs"></div>
+    <button id="newtab" title="New tab (Ctrl+T)">+</button>
+  </div>
+
+  <div id="toolbar">
+    <button id="back" title="Back (Alt+Left)">&#9664;</button>
+    <button id="forward" title="Forward (Alt+Right)">&#9654;</button>
+    <button id="reload" title="Reload (Ctrl+R)">&#10227;</button>
+    <button id="home" title="Home">&#8962;</button>
+    <input id="address" type="text" spellcheck="false" autocomplete="off" placeholder="Search Google or type a URL">
+    <button id="uabtn" title="User agent">UA</button>
+    <button id="histbtn" title="History (Ctrl+H)">History</button>
+    <button id="acct" title="Google sync">Sign in</button>
+  </div>
+
+  <div id="progress"></div>
+  <div id="views"></div>
+
+  <aside id="panel" hidden>
+    <header>
+      <h2 id="panel-title"></h2>
+      <button id="panel-close" title="Close">&times;</button>
+    </header>
+    <div id="panel-body"></div>
+  </aside>
+
+  <div id="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

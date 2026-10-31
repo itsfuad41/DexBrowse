@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DexBrowse Start</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: radial-gradient(circle at 50% 30%, #1E1B4B, #0B1220 60%);
+      color: #E2E8F0; font-family: system-ui, "Segoe UI", sans-serif;
+    }
+    h1 { font-size: 44px; margin: 0 0 6px; letter-spacing: .5px; }
+    p { margin: 0 0 28px; color: #94A3B8; }
+    form { width: min(640px, 86vw); display: flex; gap: 8px; }
+    input {
+      flex: 1; padding: 15px 20px; border-radius: 28px; border: 1px solid #334155;
+      background: #1E293B; color: #fff; font-size: 16px; outline: none;
+    }
+    input:focus { border-color: #818CF8; }
+    button {
+      padding: 0 22px; border: 0; border-radius: 28px; background: #6366F1; color: #fff;
+      font-size: 15px; cursor: pointer;
+    }
+    .links { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+    .links a {
+      color: #CBD5E1; text-decoration: none; padding: 10px 16px; border-radius: 12px;
+      background: #1E293B; border: 1px solid #334155; font-size: 14px;
+    }
+    .links a:hover { border-color: #818CF8; }
+  </style>
+</head>
+<body>
+  <h1>DexBrowse</h1>
+  <p>By Fuad &middot; Chromium for desktop</p>
+  <form action="https://www.google.com/search" method="get">
+    <input name="q" placeholder="Search Google" autofocus autocomplete="off">
+    <button type="submit">Search</button>
+  </form>
+  <div class="links">
+    <a href="https://www.google.com">Google</a>
+    <a href="https://www.youtube.com">YouTube</a>
+    <a href="https://github.com">GitHub</a>
+    <a href="https://duckduckgo.com">DuckDuckGo</a>
+    <a href="https://www.perplexity.ai">Perplexity</a>
+  </div>
+</body>
+</html>

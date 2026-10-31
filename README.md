@@ -21,6 +21,9 @@ DexBrowse is a desktop-style Android browser built using Kotlin and Android WebV
 - Minimum-version enforcement
 - GitHub Actions APK builder
 - GitHub Releases
+- Chromium capabilities: camera/microphone, location, file upload, downloads, fullscreen video
+- 29 user agents (Windows, Mac, Linux, ChromeOS, iPhone, iPad, Android)
+- Google sign-in and history sync between the phone and the PC app
 
 ## Android Requirements
 
@@ -55,3 +58,41 @@ Set kill_switch to true to disable browsing after the application retrieves the 
 Fuad
 
 DexBrowse By Fuad
+
+## PC App
+
+`desktop/` is the DexBrowse PC browser (Electron, so it runs real Chromium): tabs, address bar,
+the same user agents, local history and Google sync. Windows installer: `DexBrowse-PC-Setup.exe`.
+
+Shortcuts: Ctrl+T new tab, Ctrl+W close, Ctrl+L address bar, Ctrl+R / F5 reload,
+Ctrl+H history, Ctrl+Tab switch tabs, Alt+Left/Right back/forward, Ctrl +/-/0 zoom, F12 DevTools.
+
+Run locally: `cd desktop && npm install && npm start`
+
+## Google sign-in and history sync
+
+Phone and PC sign in with the same Google account (via Firebase) and share browsing history in
+Firestore at `users/{uid}/history`. Open **History > All devices** on the PC, or
+**Settings > Google sync** on the phone.
+
+One-time setup:
+
+1. Firebase: enable **Authentication > Google** and create a **Firestore** database.
+2. Publish `firestore.rules` (Firestore > Rules) so each account can only read its own history.
+3. Google Cloud > OAuth consent screen: add your Google account as a test user while the app is in Testing.
+4. Add these GitHub Actions secrets (Settings > Secrets and variables > Actions):
+
+| Secret | Value |
+| --- | --- |
+| `DEXBROWSE_GOOGLE_CLIENT_ID` | Desktop-app OAuth client ID |
+| `DEXBROWSE_GOOGLE_CLIENT_SECRET` | Desktop-app OAuth client secret |
+| `DEXBROWSE_FIREBASE_API_KEY` | Firebase API key |
+| `DEXBROWSE_FIREBASE_PROJECT_ID` | Firebase project ID |
+
+The keys are injected at build time and are not stored in the repository.
+If Firebase answers `INVALID_IDP_RESPONSE` on sign-in, open Authentication > Sign-in method > Google >
+Web SDK configuration and add the desktop client ID to the safelist.
+
+## Releases
+
+Push a tag such as `v2.13.0` to build and publish both the APK and the PC installer to GitHub Releases.

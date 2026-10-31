@@ -1,0 +1,4 @@
+__pycache__/
+node_modules/
+desktop/dist/
+desktop/app-config.json

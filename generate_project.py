@@ -63,6 +63,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Google / Firebase keys come from CI secrets so they never live in the repo.
+fun envField(name: String): String = "\\"" + (System.getenv(name) ?: "") + "\\""
+
 android {
     namespace = "com.fuad.dexbrowse"
     compileSdk = 34
@@ -71,14 +74,18 @@ android {
         applicationId = "com.fuad.dexbrowse"
         minSdk = 26
         targetSdk = 34
-        versionCode = 23
-        versionName = "2.12.0"
+        versionCode = 24
+        versionName = "2.13.0"
 
         buildConfigField(
             "String",
             "CONFIG_URL",
             "\\"https://raw.githubusercontent.com/itsfuad41/DexBrowse/main/config.json\\""
         )
+        buildConfigField("String", "GOOGLE_CLIENT_ID", envField("DEXBROWSE_GOOGLE_CLIENT_ID"))
+        buildConfigField("String", "GOOGLE_CLIENT_SECRET", envField("DEXBROWSE_GOOGLE_CLIENT_SECRET"))
+        buildConfigField("String", "FIREBASE_API_KEY", envField("DEXBROWSE_FIREBASE_API_KEY"))
+        buildConfigField("String", "FIREBASE_PROJECT_ID", envField("DEXBROWSE_FIREBASE_PROJECT_ID"))
     }
 
     signingConfigs {
@@ -745,6 +752,433 @@ class CredentialVault(context: Context, profileId: String = "Default") {
 }
 """)
 
+write("app/src/main/java/com/fuad/dexbrowse/SyncManager.kt", r'''
+package com.fuad.dexbrowse
+
+import android.content.Context
+import android.net.Uri
+import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.IOException
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
+import java.net.URL
+import java.net.URLEncoder
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.concurrent.Executors
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+// Google sign-in + history sync shared with the DexBrowse PC app.
+//
+// Sign-in: OAuth 2.0 (PKCE) in the system browser, redirected to a loopback
+// port this app listens on, then exchanged for a Firebase session.
+// Storage: Firestore REST, users/{uid}/history/{sha1(url)}.
+class SyncManager(context: Context) {
+
+    data class CloudVisit(
+        val url: String,
+        val title: String,
+        val visitedAt: Long,
+        val device: String
+    )
+
+    private class HttpResult(val code: Int, val body: String)
+
+    private val prefs = context.getSharedPreferences("dexbrowse_sync", Context.MODE_PRIVATE)
+    private val queue = Executors.newSingleThreadExecutor()
+
+    private val clientId = BuildConfig.GOOGLE_CLIENT_ID
+    private val clientSecret = BuildConfig.GOOGLE_CLIENT_SECRET
+    private val apiKey = BuildConfig.FIREBASE_API_KEY
+    private val projectId = BuildConfig.FIREBASE_PROJECT_ID
+    private val keyAlias = "dexbrowse_sync_key"
+
+    @Volatile private var idToken: String? = null
+    @Volatile private var idTokenExpiresAt = 0L
+
+    val configured: Boolean
+        get() = clientId.isNotEmpty() && apiKey.isNotEmpty() && projectId.isNotEmpty()
+
+    fun isSignedIn(): Boolean = prefs.contains("refresh") && prefs.contains("uid")
+
+    fun email(): String = prefs.getString("email", "") ?: ""
+
+    fun signOut() {
+        idToken = null
+        idTokenExpiresAt = 0L
+        prefs.edit().clear().apply()
+    }
+
+    // ---------- small helpers ----------
+
+    private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
+
+    private fun randomToken(bytes: Int): String {
+        val raw = ByteArray(bytes)
+        SecureRandom().nextBytes(raw)
+        return Base64.encodeToString(raw, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+    }
+
+    private fun sha1Hex(text: String): String =
+        MessageDigest.getInstance("SHA-1").digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    private fun secretKey(): SecretKey {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(keyAlias, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                keyAlias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
+        return generator.generateKey()
+    }
+
+    private fun seal(text: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val encrypted = cipher.doFinal(text.toByteArray(Charsets.UTF_8))
+        return Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + ":" +
+            Base64.encodeToString(encrypted, Base64.NO_WRAP)
+    }
+
+    private fun unseal(text: String): String? {
+        return try {
+            val parts = text.split(":")
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                secretKey(),
+                GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP))
+            )
+            String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), Charsets.UTF_8)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun http(
+        method: String,
+        url: String,
+        body: String?,
+        contentType: String,
+        bearer: String? = null
+    ): HttpResult {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = method
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 20_000
+            conn.setRequestProperty("Content-Type", contentType)
+            if (url.contains("?key=")) {
+                // Lets API keys that are restricted to this Android app work.
+                conn.setRequestProperty("X-Android-Package", BuildConfig.APPLICATION_ID)
+                conn.setRequestProperty("X-Android-Cert", "2CF3FACEFE48F452B7EE98DE63CE2C462E8810E8")
+            }
+            if (bearer != null) conn.setRequestProperty("Authorization", "Bearer $bearer")
+            if (body != null) {
+                conn.doOutput = true
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            return HttpResult(code, text)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun explain(prefix: String, res: HttpResult): String {
+        val detail = try {
+            val error = JSONObject(res.body).opt("error")
+            when (error) {
+                is JSONObject -> error.optString("message")
+                is String -> JSONObject(res.body).optString("error_description", error)
+                else -> ""
+            }
+        } catch (_: Exception) {
+            ""
+        }
+        return "$prefix (HTTP ${res.code}${if (detail.isNotEmpty()) ": $detail" else ""})"
+    }
+
+    // ---------- Google sign-in ----------
+
+    // Runs on its own thread. [openUrl] must open the given URL in a browser;
+    // [onDone] receives the signed-in e-mail address or the failure.
+    fun beginSignIn(openUrl: (String) -> Unit, onDone: (Result<String>) -> Unit) {
+        Thread {
+            var server: ServerSocket? = null
+            val result: Result<String> = try {
+                if (!configured) throw IOException("Google sync is not configured in this build")
+                server = ServerSocket(0, 5, InetAddress.getByName("127.0.0.1"))
+                server.soTimeout = 180_000
+                val redirect = "http://127.0.0.1:${server.localPort}"
+                val verifier = randomToken(48)
+                val challenge = Base64.encodeToString(
+                    MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.US_ASCII)),
+                    Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+                )
+                val state = randomToken(16)
+                openUrl(
+                    "https://accounts.google.com/o/oauth2/v2/auth" +
+                        "?client_id=${enc(clientId)}" +
+                        "&redirect_uri=${enc(redirect)}" +
+                        "&response_type=code" +
+                        "&scope=${enc("openid email profile")}" +
+                        "&code_challenge=$challenge" +
+                        "&code_challenge_method=S256" +
+                        "&state=$state" +
+                        "&prompt=select_account"
+                )
+
+                var code: String? = null
+                var denied: String? = null
+                while (code == null && denied == null) {
+                    val socket = server.accept()
+                    try {
+                        socket.soTimeout = 5_000
+                        val line = BufferedReader(InputStreamReader(socket.getInputStream()))
+                            .readLine() ?: ""
+                        val path = line.split(" ").getOrNull(1) ?: "/"
+                        val uri = Uri.parse("http://127.0.0.1$path")
+                        val gotCode = uri.getQueryParameter("code")
+                        val error = uri.getQueryParameter("error")
+                        if (error != null) {
+                            denied = error
+                            reply(socket, false)
+                        } else if (gotCode != null && uri.getQueryParameter("state") == state) {
+                            code = gotCode
+                            reply(socket, true)
+                        } else {
+                            reply(socket, null)
+                        }
+                    } catch (_: SocketTimeoutException) {
+                        // browser opened a connection but sent nothing; keep waiting
+                    } finally {
+                        try { socket.close() } catch (_: Exception) {}
+                    }
+                }
+                if (denied != null) throw IOException("Google sign-in was cancelled")
+
+                val form = "code=${enc(code!!)}" +
+                    "&client_id=${enc(clientId)}" +
+                    "&client_secret=${enc(clientSecret)}" +
+                    "&redirect_uri=${enc(redirect)}" +
+                    "&grant_type=authorization_code" +
+                    "&code_verifier=${enc(verifier)}"
+                val tokenRes = http(
+                    "POST", "https://oauth2.googleapis.com/token", form,
+                    "application/x-www-form-urlencoded"
+                )
+                if (tokenRes.code !in 200..299) throw IOException(explain("Google token exchange failed", tokenRes))
+                val googleIdToken = JSONObject(tokenRes.body).getString("id_token")
+
+                val payload = JSONObject()
+                    .put("postBody", "id_token=${enc(googleIdToken)}&providerId=google.com")
+                    .put("requestUri", "http://localhost")
+                    .put("returnIdpCredential", true)
+                    .put("returnSecureToken", true)
+                val fbRes = http(
+                    "POST",
+                    "https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=$apiKey",
+                    payload.toString(),
+                    "application/json"
+                )
+                if (fbRes.code !in 200..299) throw IOException(explain("Firebase sign-in failed", fbRes))
+                val json = JSONObject(fbRes.body)
+                val email = json.optString("email", "")
+                idToken = json.getString("idToken")
+                idTokenExpiresAt = System.currentTimeMillis() +
+                    (json.optString("expiresIn", "3600").toLong() - 60) * 1000
+                prefs.edit()
+                    .putString("refresh", seal(json.getString("refreshToken")))
+                    .putString("uid", json.getString("localId"))
+                    .putString("email", email)
+                    .apply()
+                Result.success(email)
+            } catch (e: SocketTimeoutException) {
+                Result.failure(IOException("Sign-in timed out"))
+            } catch (e: Exception) {
+                Result.failure(e)
+            } finally {
+                try { server?.close() } catch (_: Exception) {}
+            }
+            onDone(result)
+        }.start()
+    }
+
+    private fun reply(socket: Socket, ok: Boolean?) {
+        val message = when (ok) {
+            true -> "Signed in. You can close this tab and return to DexBrowse."
+            false -> "Sign-in was cancelled. You can close this tab."
+            null -> "Waiting for sign-in..."
+        }
+        val html = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" +
+            "<title>DexBrowse</title></head>" +
+            "<body style='font-family:sans-serif;background:#0B1220;color:#fff;text-align:center;padding:48px 24px'>" +
+            "<h2>DexBrowse</h2><p>$message</p></body></html>"
+        val bytes = html.toByteArray(Charsets.UTF_8)
+        val out = socket.getOutputStream()
+        out.write(
+            ("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
+                "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n")
+                .toByteArray(Charsets.US_ASCII)
+        )
+        out.write(bytes)
+        out.flush()
+    }
+
+    // ---------- Firebase session ----------
+
+    private fun ensureToken(): String? {
+        val cached = idToken
+        if (cached != null && System.currentTimeMillis() < idTokenExpiresAt) return cached
+        val refresh = prefs.getString("refresh", null)?.let { unseal(it) } ?: return null
+        return try {
+            val res = http(
+                "POST",
+                "https://securetoken.googleapis.com/v1/token?key=$apiKey",
+                "grant_type=refresh_token&refresh_token=${enc(refresh)}",
+                "application/x-www-form-urlencoded"
+            )
+            if (res.code !in 200..299) return null
+            val json = JSONObject(res.body)
+            idToken = json.getString("id_token")
+            idTokenExpiresAt = System.currentTimeMillis() +
+                (json.optString("expires_in", "3600").toLong() - 60) * 1000
+            json.optString("refresh_token").takeIf { it.isNotEmpty() }?.let {
+                prefs.edit().putString("refresh", seal(it)).apply()
+            }
+            idToken
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // ---------- Firestore ----------
+
+    private fun documentsRoot() =
+        "projects/$projectId/databases/(default)/documents"
+
+    private fun deviceName() = "Phone · ${Build.MODEL}"
+
+    private fun writeFor(uid: String, url: String, title: String, at: Long): JSONObject {
+        val fields = JSONObject()
+            .put("url", JSONObject().put("stringValue", url))
+            .put("title", JSONObject().put("stringValue", title))
+            .put("visitedAt", JSONObject().put("integerValue", at.toString()))
+            .put("device", JSONObject().put("stringValue", deviceName()))
+        val doc = JSONObject()
+            .put("name", "${documentsRoot()}/users/$uid/history/${sha1Hex(url)}")
+            .put("fields", fields)
+        return JSONObject().put("update", doc)
+    }
+
+    private fun commit(writes: List<JSONObject>) {
+        if (!isSignedIn() || writes.isEmpty()) return
+        val token = ensureToken() ?: return
+        val body = JSONObject().put("writes", JSONArray(writes)).toString()
+        http(
+            "POST",
+            "https://firestore.googleapis.com/v1/${documentsRoot()}:commit",
+            body,
+            "application/json",
+            token
+        )
+    }
+
+    // Fire-and-forget: record one page visit (no-op when signed out).
+    fun pushVisit(url: String, title: String) {
+        if (!configured || !isSignedIn()) return
+        val uid = prefs.getString("uid", null) ?: return
+        queue.execute {
+            try {
+                commit(listOf(writeFor(uid, url, title, System.currentTimeMillis())))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // Upload a batch of existing local history (newest first).
+    fun pushUrls(urls: List<String>) {
+        if (!configured || !isSignedIn()) return
+        val uid = prefs.getString("uid", null) ?: return
+        queue.execute {
+            try {
+                val now = System.currentTimeMillis()
+                urls.distinct().take(400).chunked(200).forEachIndexed { chunk, part ->
+                    commit(part.mapIndexed { i, url ->
+                        writeFor(uid, url, "", now - (chunk * 200L + i) * 1000L)
+                    })
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // Newest synced visits from every device signed in to this Google account.
+    fun fetchHistory(onDone: (Result<List<CloudVisit>>) -> Unit) {
+        Thread {
+            val result: Result<List<CloudVisit>> = try {
+                val uid = prefs.getString("uid", null)
+                    ?: throw IOException("Not signed in")
+                val token = ensureToken() ?: throw IOException("Session expired, sign in again")
+                val res = http(
+                    "GET",
+                    "https://firestore.googleapis.com/v1/${documentsRoot()}/users/$uid/history" +
+                        "?pageSize=300&orderBy=${enc("visitedAt desc")}",
+                    null,
+                    "application/json",
+                    token
+                )
+                if (res.code !in 200..299) throw IOException(explain("Could not read synced history", res))
+                val docs = JSONObject(res.body).optJSONArray("documents") ?: JSONArray()
+                val visits = ArrayList<CloudVisit>()
+                for (i in 0 until docs.length()) {
+                    val f = docs.getJSONObject(i).optJSONObject("fields") ?: continue
+                    val url = f.optJSONObject("url")?.optString("stringValue") ?: continue
+                    visits.add(
+                        CloudVisit(
+                            url = url,
+                            title = f.optJSONObject("title")?.optString("stringValue") ?: "",
+                            visitedAt = f.optJSONObject("visitedAt")
+                                ?.optString("integerValue")?.toLongOrNull() ?: 0L,
+                            device = f.optJSONObject("device")?.optString("stringValue") ?: ""
+                        )
+                    )
+                }
+                Result.success(visits)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+            onDone(result)
+        }.start()
+    }
+}
+''')
+
 write("app/src/main/java/com/fuad/dexbrowse/MainActivity.kt", r'''
 package com.fuad.dexbrowse
 
@@ -850,6 +1284,7 @@ class MainActivity : Activity() {
 
     private lateinit var security: SecurityManager
     private lateinit var history: HistoryManager
+    private val sync by lazy { SyncManager(applicationContext) }
     private lateinit var credentialVault: CredentialVault
     private val blocker = AdBlockManager()
 
@@ -2455,6 +2890,9 @@ document.getElementById('f').onsubmit=function(e){
                     tab.isOfflinePage = false
                     saveOfflineArchive(tab.web, page)
                     history.add(page)
+                    if (!guestMode && page.startsWith("https://")) {
+                        sync.pushVisit(page, tab.title)
+                    }
                 } else {
                     tab.isOfflinePage = page.startsWith("file://")
                 }
@@ -3055,7 +3493,8 @@ document.getElementById('f').onsubmit=function(e){
             "About DexBrowse",
             "Bookmarks",
             "Bookmark this page",
-            "Extensions"
+            "Extensions",
+            "Google sync: " + if (sync.isSignedIn()) sync.email() else "Sign in"
         )
 
         dialog()
@@ -3098,9 +3537,129 @@ document.getElementById('f').onsubmit=function(e){
                     21 -> showBookmarks()
                     22 -> addCurrentBookmark()
                     23 -> showExtensionsInfo()
+                    24 -> showSyncMenu()
                 }
             }
             .show()
+    }
+
+    // ---------- Google sync ----------
+
+    private fun showSyncMenu() {
+        if (!sync.configured) {
+            dialog()
+                .setTitle("Google sync")
+                .setMessage("Google sync is not set up in this build of DexBrowse.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        if (!sync.isSignedIn()) {
+            dialog()
+                .setTitle("Google sync")
+                .setMessage(
+                    "Sign in with Google to read this phone's history in the DexBrowse " +
+                        "PC app, and the PC history here."
+                )
+                .setPositiveButton("Sign in") { _, _ -> signInWithGoogle() }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        val options = arrayOf(
+            "Synced history (all devices)",
+            "Upload this phone's history now",
+            "Sign out (" + sync.email() + ")"
+        )
+        dialog()
+            .setTitle("Google sync")
+            .setItems(options) { _, index ->
+                when (index) {
+                    0 -> showCloudHistory()
+                    1 -> {
+                        uploadExistingHistory()
+                        toast("Uploading history")
+                    }
+                    2 -> {
+                        sync.signOut()
+                        toast("Signed out of Google sync")
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun signInWithGoogle() {
+        // The browser takes over the screen; do not lock DexBrowse meanwhile.
+        externalFlowInProgress = true
+        toast("Opening Google sign-in")
+        sync.beginSignIn(
+            openUrl = { url ->
+                runOnUiThread {
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    } catch (_: Exception) {
+                        toast("No browser available for sign-in", true)
+                    }
+                }
+            },
+            onDone = { result ->
+                runOnUiThread {
+                    externalFlowInProgress = false
+                    result.onSuccess { email ->
+                        toast("Signed in as $email")
+                        try {
+                            startActivity(
+                                Intent(this, MainActivity::class.java).addFlags(
+                                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                )
+                            )
+                        } catch (_: Exception) {
+                        }
+                        uploadExistingHistory()
+                    }
+                    result.onFailure { error ->
+                        toast("Sign-in failed: " + (error.message ?: "unknown error"), true)
+                    }
+                }
+            }
+        )
+    }
+
+    private fun uploadExistingHistory() {
+        sync.pushUrls(history.getAll())
+    }
+
+    private fun showCloudHistory() {
+        toast("Loading synced history")
+        sync.fetchHistory { result ->
+            runOnUiThread {
+                val visits = result.getOrNull()
+                if (visits == null) {
+                    toast(
+                        "Could not load synced history: " +
+                            (result.exceptionOrNull()?.message ?: "unknown error"),
+                        true
+                    )
+                } else if (visits.isEmpty()) {
+                    toast("No synced history yet")
+                } else {
+                    val format = java.text.SimpleDateFormat("d MMM, HH:mm", java.util.Locale.getDefault())
+                    val labels = visits.map { visit ->
+                        val icon = if (visit.device.startsWith("PC")) "\uD83D\uDDA5 " else "\uD83D\uDCF1 "
+                        val name = visit.title.ifBlank { Uri.parse(visit.url).host ?: visit.url }
+                        icon + name + "\n" + visit.url + "\n" + visit.device + " - " +
+                            format.format(java.util.Date(visit.visitedAt))
+                    }.toTypedArray()
+                    dialog()
+                        .setTitle("Synced history (all devices)")
+                        .setItems(labels) { _, index -> navigate(visits[index].url) }
+                        .setNegativeButton("Close", null)
+                        .show()
+                }
+            }
+        }
     }
 
     private fun showProfileManagement() {

@@ -1,0 +1,61 @@
+name: Build DexBrowse PC
+
+on:
+  push:
+    branches:
+      - main
+      - refs
+    tags:
+      - "v*"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+
+      - name: Build Windows installer
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          DEXBROWSE_GOOGLE_CLIENT_ID: ${{ secrets.DEXBROWSE_GOOGLE_CLIENT_ID }}
+          DEXBROWSE_GOOGLE_CLIENT_SECRET: ${{ secrets.DEXBROWSE_GOOGLE_CLIENT_SECRET }}
+          DEXBROWSE_FIREBASE_API_KEY: ${{ secrets.DEXBROWSE_FIREBASE_API_KEY }}
+          DEXBROWSE_FIREBASE_PROJECT_ID: ${{ secrets.DEXBROWSE_FIREBASE_PROJECT_ID }}
+        run: npm run dist
+
+      - name: Verify installer
+        shell: bash
+        run: |
+          ls -la desktop/dist
+          test -f desktop/dist/DexBrowse-PC-Setup.exe
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexBrowse-PC-Windows
+          path: desktop/dist/DexBrowse-PC-Setup.exe
+          if-no-files-found: error
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/dist/DexBrowse-PC-Setup.exe
+          generate_release_notes: true
