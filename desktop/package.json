@@ -1,7 +1,7 @@
 {
   "name": "dexbrowse-desktop",
   "productName": "DexBrowse",
-  "version": "2.13.0",
+  "version": "2.14.0",
   "description": "DexBrowse By Fuad - Chromium desktop browser",
   "main": "main.js",
   "author": "Fuad",
@@ -20,7 +20,10 @@
     "files": [
       "main.js",
       "preload.js",
+      "guest-preload.js",
       "sync.js",
+      "shields.js",
+      "shieldlists.js",
       "config.js",
       "uas.js",
       "app-config.json",

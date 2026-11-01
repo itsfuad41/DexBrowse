@@ -1,20 +1,71 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const call = (channel) => (...args) => ipcRenderer.invoke(channel, ...args);
-const EVENTS = ['open-tab', 'shortcut', 'download'];
+const EVENTS = ['open-tab', 'shortcut', 'download-update', 'blocked', 'settings-changed', 'lock', 'hosted-navigate'];
 
 contextBridge.exposeInMainWorld('dex', {
-  info: call('app:info'),
+  config: call('app:config'),
+  settingsSet: call('settings:set'),
   uaList: call('ua:list'),
   uaSet: call('ua:set'),
+
   historyAdd: call('history:add'),
   historyList: call('history:list'),
   historyClear: call('history:clear'),
+  historyRemove: call('history:remove'),
+
+  bookmarksList: call('bookmarks:list'),
+  bookmarksAdd: call('bookmarks:add'),
+  bookmarksRemove: call('bookmarks:remove'),
+  readingList: call('reading:list'),
+  readingAdd: call('reading:add'),
+  readingRemove: call('reading:remove'),
+
+  downloadsList: call('downloads:list'),
+  downloadsCancel: call('downloads:cancel'),
+  downloadsOpen: call('downloads:open'),
+  downloadsShow: call('downloads:show'),
+  downloadsClear: call('downloads:clear'),
+
+  shieldsSite: call('shields:site'),
+  shieldsSiteSet: call('shields:site-set'),
+  shieldsSites: call('shields:sites'),
+  shieldsSiteReset: call('shields:site-reset'),
+  shieldsStats: call('shields:stats'),
+
+  loginsList: call('logins:list'),
+  loginsSave: call('logins:save'),
+  loginsFill: call('logins:fill'),
+  loginsReveal: call('logins:reveal'),
+  loginsDelete: call('logins:delete'),
+  loginsNever: call('logins:never'),
+  loginsNeverAdd: call('logins:never-add'),
+  loginsNeverRemove: call('logins:never-remove'),
+
+  lockStatus: call('lock:status'),
+  lockUnlock: call('lock:unlock'),
+  lockSet: call('lock:set'),
+  lockRemove: call('lock:remove'),
+  lockNow: call('lock:now'),
+  lockReset: call('lock:reset'),
+
+  permissionsList: call('permissions:list'),
+  permissionsRemove: call('permissions:remove'),
+  dataClear: call('data:clear'),
+
+  sessionSave: call('session:save'),
+  sessionLoad: call('session:load'),
+  windowNew: call('window:new'),
+  windowQuit: call('app:quit'),
+  savePdf: call('page:savepdf'),
+  activity: call('app:activity'),
+
   syncStatus: call('sync:status'),
   syncSignIn: call('sync:signin'),
   syncSignOut: call('sync:signout'),
   syncCloud: call('sync:cloud'),
   syncUpload: call('sync:upload'),
+
   on(channel, callback) {
     if (EVENTS.includes(channel)) {
       ipcRenderer.on(channel, (_event, data) => callback(data));

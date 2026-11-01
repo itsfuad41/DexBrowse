@@ -1,23 +1,62 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const START = new URL('start.html', location.href).href;
-const SEARCH = 'https://www.google.com/search?q=';
+const PRIV = new URLSearchParams(location.search).get('private') === '1';
+const PARTITION = PRIV ? 'private' : 'persist:browse';
+const START_BASE = new URL('start.html', location.href).href;
+
+const ICONS = {
+  back: '<path d="M15 18l-6-6 6-6"/>',
+  forward: '<path d="M9 6l6 6-6 6"/>',
+  reload: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
+  close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  star: '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
+  shield: '<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
+  warn: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/>',
+  up: '<path d="M18 15l-6-6-6 6"/>',
+  down: '<path d="M6 9l6 6 6-6"/>',
+  sound: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 9c1.5 1.5 1.5 4.5 0 6"/>',
+  mute: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l4 6M21 9l-4 6"/>'
+};
+const svg = (name) => `<svg viewBox="0 0 24 24">${ICONS[name]}</svg>`;
 
 const tabs = [];
+const closed = [];
+const pendingBlocked = new Map();
+const dlCache = new Map();
 let active = null;
 let seq = 0;
+let cfg = null;
 let sync = { configured: false, signedIn: false, email: '' };
+let bookmarks = [];
 let panelKind = null;
+let libTab = 'history';
+let pendingSave = null;
+let settingsOpen = false;
+let lockEnabled = false;
 
 // ---------- helpers ----------
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
   Object.assign(node, props || {});
   for (const child of children) {
-    node.append(child instanceof Node ? child : document.createTextNode(child));
+    if (child == null || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return node;
+}
+function iconEl(name, cls) {
+  const span = el('span', { className: cls || 'ico' });
+  span.innerHTML = svg(name);
+  return span;
+}
+function setIcon(id, name) {
+  $(id).insertAdjacentHTML('afterbegin', svg(name));
 }
 
 let toastTimer = null;
@@ -29,235 +68,444 @@ function toast(message) {
   toastTimer = setTimeout(() => { box.hidden = true; }, 3500);
 }
 
-function toUrl(text) {
-  text = text.trim();
-  if (!text) return null;
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) || /^(about|data|view-source):/i.test(text)) return text;
-  if (/^localhost(:\d+)?([/?#]|$)/i.test(text) || /^(\d{1,3}\.){3}\d{1,3}(:\d+)?([/?#]|$)/.test(text)) {
-    return 'http://' + text;
-  }
-  if (!/\s/.test(text) && /^[^\s/]+\.[a-z]{2,}(:\d+)?([/?#].*)?$/i.test(text)) return 'https://' + text;
-  return SEARCH + encodeURIComponent(text);
-}
-
-function hostOf(url) {
-  try { return new URL(url).host || url; } catch (_) { return url; }
-}
+const engineUrl = () => cfg.engines[cfg.settings.engine];
+const hostOf = (url) => { try { return new URL(url).host || url; } catch (_) { return url; } };
+const isStart = (url) => typeof url === 'string' && url.startsWith(START_BASE);
+const isWeb = (url) => /^https?:\/\//i.test(url || '');
 
 function when(ts) {
   return new Date(ts).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
+function size(bytes) {
+  if (!bytes) return '';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (bytes >= 1024 && i < 3) { bytes /= 1024; i++; }
+  return `${bytes.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function effectiveTheme() {
+  const t = cfg.settings.theme;
+  if (t === 'system') return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  return t;
+}
+function applyTheme() {
+  document.documentElement.dataset.theme = effectiveTheme();
+}
+
+function toUrl(text) {
+  text = text.trim();
+  if (!text) return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) || /^(about|data|view-source):/i.test(text)) return text;
+  if (/^localhost(:\d+)?([/?#]|$)/i.test(text) || /^(\d{1,3}\.){3}\d{1,3}(:\d+)?([/?#]|$)/.test(text)) return 'http://' + text;
+  if (!/\s/.test(text) && /^[^\s/]+\.[a-z]{2,}(:\d+)?([/?#].*)?$/i.test(text)) return 'https://' + text;
+  return engineUrl() + encodeURIComponent(text);
+}
+
+async function buildStartUrl() {
+  const stats = (await dex.shieldsStats()).data || {};
+  let tiles = [];
+  if (!PRIV) {
+    const res = await dex.historyList();
+    if (res.ok) {
+      const seen = new Set();
+      for (const v of res.data) {
+        try {
+          const origin = new URL(v.url).origin;
+          if (!seen.has(origin)) { seen.add(origin); tiles.push({ title: new URL(v.url).hostname.replace(/^www\./, ''), url: origin }); }
+        } catch (_) { /* skip */ }
+        if (tiles.length >= 8) break;
+      }
+    }
+  }
+  const q = new URLSearchParams({
+    e: engineUrl(), n: cfg.settings.engine, t: effectiveTheme(),
+    ads: stats.ads || 0, trk: stats.trackers || 0, up: stats.upgrades || 0,
+    p: PRIV ? '1' : '0', tiles: JSON.stringify(tiles)
+  });
+  return START_BASE + '?' + q.toString();
+}
+
+async function homeUrl() {
+  const s = cfg.settings;
+  if (s.startup === 'homepage' && s.homepage) return toUrl(s.homepage);
+  return buildStartUrl();
+}
 
 // ---------- tabs ----------
-function createTab(url = START, activate = true) {
+function createTab(url, activate = true, opts = {}) {
   const view = document.createElement('webview');
-  view.setAttribute('partition', 'persist:browse');
+  view.setAttribute('partition', PARTITION);
   view.setAttribute('allowpopups', '');
   view.setAttribute('plugins', '');
-  view.setAttribute('src', url);
+  view.setAttribute('preload', cfg.guestPreload);
 
-  const tab = { id: ++seq, view, title: 'New tab', url, loading: false, favicon: '', ready: false, recorded: '', zoom: 0 };
-  tabs.push(tab);
+  const startPage = !url || url === 'dex://start';
+  const tab = {
+    id: ++seq, view, title: 'New tab', url: startPage ? START_BASE : url, loading: false, favicon: '',
+    ready: false, recorded: '', zoom: 0, pinned: !!opts.pinned, audible: false, muted: false,
+    blocked: 0, wcId: null, failedUrl: null
+  };
+  if (tab.pinned) tabs.splice(tabs.filter((t) => t.pinned).length, 0, tab);
+  else tabs.push(tab);
 
-  view.addEventListener('dom-ready', () => { tab.ready = true; if (tab === active) updateToolbar(); });
+  view.addEventListener('dom-ready', () => {
+    tab.ready = true;
+    try {
+      tab.wcId = view.getWebContentsId();
+      if (pendingBlocked.has(tab.wcId)) tab.blocked = pendingBlocked.get(tab.wcId);
+      if (tab.muted) view.setAudioMuted(true);
+      if (tab.zoom) view.setZoomLevel(tab.zoom);
+    } catch (_) { /* ignore */ }
+    if (tab === active) updateToolbar();
+  });
   view.addEventListener('page-title-updated', (e) => { tab.title = e.title || tab.title; renderTabs(); });
   view.addEventListener('page-favicon-updated', (e) => { tab.favicon = (e.favicons && e.favicons[0]) || ''; renderTabs(); });
-  view.addEventListener('did-start-loading', () => { tab.loading = true; if (tab === active) updateToolbar(); });
+  view.addEventListener('did-start-loading', () => { tab.loading = true; if (tab === active) updateToolbar(); renderTabs(); });
   view.addEventListener('did-stop-loading', () => {
     tab.loading = false;
     recordVisit(tab);
     if (tab === active) updateToolbar();
     renderTabs();
   });
+  view.addEventListener('did-start-navigation', (e) => {
+    if (e.isMainFrame && !e.isInPlace) { tab.blocked = 0; if (tab === active) updateShieldBadge(); }
+  });
   view.addEventListener('did-navigate', (e) => onNavigate(tab, e.url));
   view.addEventListener('did-navigate-in-page', (e) => { if (e.isMainFrame) onNavigate(tab, e.url); });
   view.addEventListener('did-fail-load', (e) => {
     if (!e.isMainFrame || e.errorCode === -3) return;
-    const page = '<body style="font-family:system-ui;background:#0B1220;color:#E2E8F0;text-align:center;padding-top:15vh">' +
-      '<h2>This page can’t be reached</h2><p style="color:#94A3B8">Check the address and your internet connection.</p></body>';
-    view.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(page));
+    const page = '<body style="font-family:system-ui;background:#17181F;color:#EDEEF2;text-align:center;padding-top:15vh">' +
+      '<h2>This site can’t be reached</h2><p style="color:#9DA0AE">Check the address and your internet connection.</p></body>';
     tab.failedUrl = e.validatedURL;
+    view.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(page));
   });
+  view.addEventListener('found-in-page', (e) => {
+    if (tab !== active) return;
+    const r = e.result;
+    $('findcount').textContent = r.matches ? `${r.activeMatchOrdinal}/${r.matches}` : '0/0';
+  });
+  view.addEventListener('media-started-playing', () => { tab.audible = true; renderTabs(); });
+  view.addEventListener('media-paused', () => { tab.audible = false; renderTabs(); });
+  view.addEventListener('focus', closePops);
+  view.addEventListener('enter-html-full-screen', () => document.body.classList.add('fs'));
+  view.addEventListener('leave-html-full-screen', () => document.body.classList.remove('fs'));
+  view.addEventListener('ipc-message', (e) => onGuestMessage(tab, e));
 
   $('views').append(view);
+  if (startPage) buildStartUrl().then((u) => view.setAttribute('src', u));
+  else view.setAttribute('src', url);
   if (activate) activateTab(tab);
   else renderTabs();
+  scheduleSessionSave();
   return tab;
+}
+
+function navigateTab(tab, url) {
+  if (tab.ready) tab.view.loadURL(url).catch(() => {});
+  else tab.view.setAttribute('src', url);
 }
 
 function onNavigate(tab, url) {
   if (url.startsWith('data:')) return;
   tab.url = url;
   tab.failedUrl = null;
-  if (url === START) tab.title = 'New tab';
+  if (isStart(url)) tab.title = 'New tab';
   if (tab === active) updateToolbar();
+  scheduleSessionSave();
 }
 
 function recordVisit(tab) {
-  if (!/^https?:\/\//i.test(tab.url) || tab.recorded === tab.url) return;
+  if (PRIV || !isWeb(tab.url) || tab.recorded === tab.url) return;
   tab.recorded = tab.url;
-  window.dex.historyAdd({ url: tab.url, title: tab.title });
+  dex.historyAdd({ url: tab.url, title: tab.title });
 }
 
 function activateTab(tab) {
+  closeSettings();
   active = tab;
   for (const t of tabs) t.view.classList.toggle('active', t === tab);
   renderTabs();
   updateToolbar();
-  if (tab.url === START) $('address').focus();
+  $('findcount').textContent = '';
+  if (isStart(tab.url) && !panelKind) $('address').focus();
 }
 
 function closeTab(tab) {
   const index = tabs.indexOf(tab);
   if (index < 0) return;
+  if (isWeb(tab.url)) closed.push(tab.url);
   tabs.splice(index, 1);
   tab.view.remove();
   if (!tabs.length) { createTab(); return; }
   if (active === tab) activateTab(tabs[Math.min(index, tabs.length - 1)]);
   else renderTabs();
+  scheduleSessionSave();
+}
+
+function togglePin(tab) {
+  tab.pinned = !tab.pinned;
+  tabs.splice(tabs.indexOf(tab), 1);
+  const pinnedCount = tabs.filter((t) => t.pinned).length;
+  tabs.splice(pinnedCount, 0, tab);
+  renderTabs();
 }
 
 function renderTabs() {
   const strip = $('tabs');
   strip.replaceChildren();
   for (const tab of tabs) {
-    const node = el('div', { className: 'tab' + (tab === active ? ' active' : ''), title: tab.title });
-    if (tab.favicon) node.append(el('img', { src: tab.favicon, alt: '' }));
-    node.append(el('span', { className: 't' }, tab.loading ? 'Loading…' : tab.title));
-    const close = el('button', { className: 'x', title: 'Close tab' }, '×');
-    close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tab); });
-    node.append(close);
+    const node = el('div', { className: 'tab' + (tab === active ? ' active' : '') + (tab.pinned ? ' pinned' : ''), title: tab.title });
+    if (tab.loading) node.append(el('span', { className: 'spin' }));
+    else if (tab.favicon) node.append(el('img', { src: tab.favicon, alt: '' }));
+    else node.append(el('span', { className: 'fav' }, (hostOf(tab.url).replace(/^www\./, '')[0] || 'D').toUpperCase()));
+    if (!tab.pinned) node.append(el('span', { className: 't' }, tab.title));
+    if (tab.audible || tab.muted) {
+      const snd = el('button', { className: 'snd', title: tab.muted ? 'Unmute tab' : 'Mute tab' });
+      snd.innerHTML = svg(tab.muted ? 'mute' : 'sound');
+      snd.addEventListener('click', (e) => { e.stopPropagation(); toggleMute(tab); });
+      node.append(snd);
+    }
+    if (!tab.pinned) {
+      const close = el('button', { className: 'x', title: 'Close tab' });
+      close.innerHTML = svg('close');
+      close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tab); });
+      node.append(close);
+    }
     node.addEventListener('click', () => activateTab(tab));
-    node.addEventListener('auxclick', (e) => { if (e.button === 1) closeTab(tab); });
+    node.addEventListener('auxclick', (e) => { if (e.button === 1 && !tab.pinned) closeTab(tab); });
+    node.addEventListener('contextmenu', (e) => { e.preventDefault(); showTabMenu(tab, e.clientX, e.clientY); });
     strip.append(node);
   }
-  const t = active ? active.title : '';
-  document.title = t ? `${t} – DexBrowse` : 'DexBrowse By Fuad';
+  document.title = active ? `${active.title} – DexBrowse` : 'DexBrowse By Fuad';
+}
+
+function toggleMute(tab) {
+  tab.muted = !tab.muted;
+  if (tab.ready) tab.view.setAudioMuted(tab.muted);
+  renderTabs();
+}
+
+function showTabMenu(tab, x, y) {
+  closePops();
+  const box = $('ctx');
+  box.replaceChildren();
+  const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
+  add('Reload', () => tab.ready && tab.view.reload());
+  add('Duplicate', () => createTab(isStart(tab.url) ? 'dex://start' : tab.url));
+  add(tab.pinned ? 'Unpin tab' : 'Pin tab', () => togglePin(tab));
+  add(tab.muted ? 'Unmute site' : 'Mute site', () => toggleMute(tab));
+  box.append(el('hr'));
+  if (!tab.pinned) add('Close tab', () => closeTab(tab));
+  add('Close other tabs', () => { for (const t of [...tabs]) if (t !== tab && !t.pinned) closeTab(t); });
+  box.style.left = Math.min(x, innerWidth - 200) + 'px';
+  box.style.top = Math.min(y, innerHeight - 220) + 'px';
+  box.hidden = false;
+}
+
+function updateShieldBadge() {
+  const badge = $('shieldcount');
+  const n = active ? active.blocked : 0;
+  badge.hidden = !(n > 0);
+  badge.textContent = n > 99 ? '99+' : String(n);
 }
 
 function updateToolbar() {
   if (!active) return;
   const v = active.view;
-  if (document.activeElement !== $('address')) {
-    $('address').value = active.url === START ? '' : (active.failedUrl || active.url);
-  }
+  const shown = active.failedUrl || active.url;
+  if (document.activeElement !== $('address')) $('address').value = isStart(shown) ? '' : shown;
   $('back').disabled = !(active.ready && v.canGoBack());
   $('forward').disabled = !(active.ready && v.canGoForward());
-  $('reload').textContent = active.loading ? '✕' : '⟳';
+  $('reload').replaceChildren();
+  $('reload').insertAdjacentHTML('afterbegin', svg(active.loading ? 'close' : 'reload'));
   $('progress').classList.toggle('on', active.loading);
+  $('star').classList.toggle('on', bookmarks.some((b) => b.url === active.url));
+  const siteicon = $('siteicon');
+  siteicon.replaceChildren();
+  siteicon.insertAdjacentHTML('afterbegin', svg(/^https:/i.test(active.url) ? 'lock' : isWeb(active.url) ? 'warn' : 'globe'));
+  siteicon.title = /^https:/i.test(active.url) ? 'Connection is secure' : isWeb(active.url) ? 'Connection is not secure' : '';
+  $('shieldbtn').classList.toggle('off', !cfg.settings.shields.enabled);
+  updateShieldBadge();
 }
 
-function go(text) {
+async function go(text) {
+  closeSettings();
+  const m = text.trim().match(/^(?:dex|brave|chrome|about):\/\/([a-z-]+)/i);
+  if (m) { openInternal(m[1].toLowerCase()); return; }
   const url = toUrl(text);
   if (!url || !active) return;
-  active.view.loadURL(url).catch(() => {});
+  navigateTab(active, url);
   active.view.focus();
+}
+
+function openInternal(name) {
+  switch (name) {
+    case 'settings': openSettings('appearance'); break;
+    case 'passwords': openSettings('passwords'); break;
+    case 'shields': openSettings('shields'); break;
+    case 'history': showLibrary('history'); break;
+    case 'bookmarks': showLibrary('bookmarks'); break;
+    case 'downloads': showLibrary('downloads'); break;
+    case 'newtab': case 'start': case 'home': homeUrl().then((u) => active && navigateTab(active, u)); break;
+    default: toast('Unknown page: ' + name);
+  }
+}
+
+// ---------- bookmarks ----------
+async function refreshBookmarks() {
+  const res = await dex.bookmarksList();
+  bookmarks = res.ok ? res.data : [];
+  renderBookmarkBar();
+  if (active) updateToolbar();
+}
+
+function renderBookmarkBar() {
+  const bar = $('bmbar');
+  bar.hidden = !cfg.settings.bookmarksBar;
+  bar.replaceChildren();
+  if (!bookmarks.length) { bar.append(el('span', { className: 'hint' }, 'Bookmarks you add appear here (Ctrl+D)')); return; }
+  for (const b of bookmarks.slice(0, 20)) {
+    bar.append(el('button', { className: 'chip', title: b.url, onclick: () => go(b.url) }, b.title));
+  }
+}
+
+async function toggleBookmark() {
+  if (!active || !isWeb(active.url)) { toast('Only web pages can be bookmarked'); return; }
+  if (PRIV) { toast('Bookmarks are not saved in private windows'); return; }
+  const existing = bookmarks.find((b) => b.url === active.url);
+  const res = existing ? await dex.bookmarksRemove(existing.id) : await dex.bookmarksAdd({ title: active.title, url: active.url });
+  if (!res.ok) { toast(res.error); return; }
+  bookmarks = res.data;
+  renderBookmarkBar();
+  updateToolbar();
+  toast(existing ? 'Bookmark removed' : 'Bookmarked');
+  if (panelKind === 'library' && libTab === 'bookmarks') showLibrary('bookmarks');
 }
 
 // ---------- panels ----------
 function openPanel(kind, title) {
+  closePops();
   panelKind = kind;
   $('panel-title').textContent = title;
   $('panel').hidden = false;
   $('panel-body').replaceChildren();
   return $('panel-body');
 }
-
 function closePanel() {
   panelKind = null;
   $('panel').hidden = true;
 }
 
-function visitRow(v, device) {
+function visitRow(v, opts = {}) {
   const row = el('button', { className: 'row', title: v.url },
     el('span', { className: 'a' }, v.title || hostOf(v.url)),
-    el('span', { className: 'b' }, `${v.url}`),
-    el('span', { className: 'b' }, device ? `${v.device || ''} · ${when(v.visitedAt)}` : when(v.visitedAt)));
+    el('span', { className: 'b' }, v.url),
+    el('span', { className: 'b' }, opts.device ? `${v.device || ''} · ${when(v.visitedAt)}` : v.visitedAt ? when(v.visitedAt) : ''));
   row.addEventListener('click', () => { go(v.url); closePanel(); });
-  return row;
+  if (!opts.onRemove) return row;
+  const remove = el('button', { className: 'icon', title: 'Remove', onclick: opts.onRemove });
+  remove.innerHTML = svg('close');
+  return el('div', { className: 'item-line' }, row, remove);
 }
 
-async function showHistory(tabName) {
-  const body = openPanel('history', 'History');
+async function showLibrary(which) {
+  libTab = which || libTab;
+  const body = openPanel('library', 'Library');
   const seg = el('div', { className: 'seg' });
-  const local = el('button', { className: tabName === 'cloud' ? '' : 'on' }, 'This PC');
-  const cloud = el('button', { className: tabName === 'cloud' ? 'on' : '' }, 'All devices (Google)');
-  local.addEventListener('click', () => showHistory('local'));
-  cloud.addEventListener('click', () => showHistory('cloud'));
-  seg.append(local, cloud);
+  for (const [id, label] of [['history', 'History'], ['cloud', 'Synced'], ['bookmarks', 'Bookmarks'], ['reading', 'Reading list'], ['downloads', 'Downloads']]) {
+    seg.append(el('button', { className: libTab === id ? 'on' : '', onclick: () => showLibrary(id) }, label));
+  }
   const list = el('div');
-  body.append(seg, list);
+  body.append(seg);
 
-  if (tabName !== 'cloud') {
-    const res = await window.dex.historyList();
+  const withSearch = (items, render, emptyText) => {
+    const search = el('input', { className: 'search', placeholder: 'Search', type: 'text' });
+    const out = el('div');
+    const paint = () => {
+      out.replaceChildren();
+      const q = search.value.toLowerCase();
+      const shown = items.filter((i) => !q || (i.title || '').toLowerCase().includes(q) || (i.url || '').toLowerCase().includes(q));
+      if (!shown.length) out.append(el('div', { className: 'note' }, emptyText));
+      for (const item of shown) out.append(render(item));
+    };
+    search.addEventListener('input', paint);
+    list.append(search, out);
+    paint();
+  };
+
+  body.append(list);
+
+  if (libTab === 'history') {
+    const res = await dex.historyList();
+    const actions = el('div', { className: 'actions' }, el('button', { onclick: async () => { await dex.historyClear(); showLibrary('history'); } }, 'Clear history'));
+    list.append(actions);
+    withSearch(res.ok ? res.data : [], (v) => visitRow(v, { onRemove: async () => { await dex.historyRemove(v.url); showLibrary('history'); } }),
+      PRIV ? 'Private windows do not save history.' : 'No history yet.');
+  } else if (libTab === 'bookmarks') {
+    withSearch(bookmarks, (b) => visitRow(b, { onRemove: async () => { const r = await dex.bookmarksRemove(b.id); if (r.ok) { bookmarks = r.data; renderBookmarkBar(); updateToolbar(); showLibrary('bookmarks'); } } }),
+      'No bookmarks yet. Press Ctrl+D on a page.');
+  } else if (libTab === 'reading') {
+    const res = await dex.readingList();
     const items = res.ok ? res.data : [];
-    const actions = el('div', { className: 'actions' });
-    const clear = el('button', {}, 'Clear history');
-    clear.addEventListener('click', async () => { await window.dex.historyClear(); showHistory('local'); });
-    actions.append(clear);
-    list.append(actions);
-    if (!items.length) list.append(el('div', { className: 'note' }, 'No history yet.'));
-    for (const v of items) list.append(visitRow(v, false));
-    return;
+    list.append(el('div', { className: 'actions' }, el('button', { className: 'primary', onclick: async () => {
+      if (!active || !isWeb(active.url)) { toast('Open a web page first'); return; }
+      const r = await dex.readingAdd({ title: active.title, url: active.url });
+      toast(r.ok ? 'Added to reading list' : r.error);
+      showLibrary('reading');
+    } }, 'Add current page')));
+    withSearch(items, (b) => visitRow(b, { onRemove: async () => { await dex.readingRemove(b.id); showLibrary('reading'); } }),
+      'Your reading list is empty.');
+  } else if (libTab === 'downloads') {
+    await paintDownloads(list);
+  } else {
+    await refreshSync();
+    if (!sync.configured) { list.append(el('div', { className: 'note' }, 'Google sync is not set up in this build.')); return; }
+    if (!sync.signedIn) {
+      list.append(el('div', { className: 'note' }, 'Sign in with Google to see the history of your phone and this PC together.'),
+        el('div', { className: 'actions' }, el('button', { className: 'primary', onclick: async () => { await signIn(); if (panelKind === 'library') showLibrary('cloud'); } }, 'Sign in with Google')));
+      return;
+    }
+    list.append(el('div', { className: 'note' }, 'Loading synced history…'));
+    const res = await dex.syncCloud();
+    list.replaceChildren(el('div', { className: 'actions' },
+      el('button', { onclick: () => showLibrary('cloud') }, 'Refresh'),
+      el('button', { onclick: async () => { const r = await dex.syncUpload(); toast(r.ok ? 'History uploaded' : r.error); } }, 'Upload this PC’s history')));
+    if (!res.ok) { list.append(el('div', { className: 'note' }, res.error)); return; }
+    if (!res.data.length) list.append(el('div', { className: 'note' }, 'No synced history yet.'));
+    for (const v of res.data) list.append(visitRow(v, { device: true }));
   }
-
-  await refreshSync();
-  if (!sync.configured) {
-    list.append(el('div', { className: 'note' }, 'Google sync is not set up in this build.'));
-    return;
-  }
-  if (!sync.signedIn) {
-    list.append(el('div', { className: 'note' }, 'Sign in with Google to see the history of your phone and this PC together.'));
-    const actions = el('div', { className: 'actions' });
-    const btn = el('button', { className: 'primary' }, 'Sign in with Google');
-    btn.addEventListener('click', async () => { await signIn(); if (panelKind === 'history') showHistory('cloud'); });
-    actions.append(btn);
-    list.append(actions);
-    return;
-  }
-  list.append(el('div', { className: 'note' }, 'Loading synced history…'));
-  const res = await window.dex.syncCloud();
-  list.replaceChildren();
-  const actions = el('div', { className: 'actions' });
-  const refresh = el('button', {}, 'Refresh');
-  refresh.addEventListener('click', () => showHistory('cloud'));
-  const upload = el('button', {}, 'Upload this PC’s history');
-  upload.addEventListener('click', async () => {
-    const r = await window.dex.syncUpload();
-    toast(r.ok ? 'History uploaded' : r.error);
-  });
-  actions.append(refresh, upload);
-  list.append(actions);
-  if (!res.ok) { list.append(el('div', { className: 'note' }, res.error)); return; }
-  if (!res.data.length) list.append(el('div', { className: 'note' }, 'No synced history yet.'));
-  for (const v of res.data) list.append(visitRow(v, true));
 }
 
-async function showUserAgents() {
-  const body = openPanel('ua', 'User agent');
-  const res = await window.dex.uaList();
-  if (!res.ok) { body.append(el('div', { className: 'note' }, res.error)); return; }
-  body.append(el('div', { className: 'note' }, 'Choose how this browser identifies itself to websites. The page reloads after you pick one.'));
-  for (const name of res.data.names) {
-    const row = el('button', { className: 'row' + (name === res.data.current ? ' sel' : '') },
-      el('span', { className: 'a' }, (name === res.data.current ? '✓ ' : '') + name));
-    row.addEventListener('click', async () => {
-      const r = await window.dex.uaSet(name);
-      if (!r.ok) { toast(r.error); return; }
-      toast('User agent: ' + name);
-      for (const t of tabs) if (t.ready && /^https?:/i.test(t.url)) t.view.reloadIgnoringCache();
-      closePanel();
-    });
-    body.append(row);
+async function paintDownloads(list) {
+  const res = await dex.downloadsList();
+  list.replaceChildren();
+  for (const d of res.ok ? res.data : []) dlCache.set(d.id, d);
+  const items = [...dlCache.values()].filter((d) => d.priv === PRIV).sort((a, b) => b.id - a.id);
+  list.append(el('div', { className: 'actions' }, el('button', { onclick: async () => { await dex.downloadsClear(); dlCache.clear(); showLibrary('downloads'); } }, 'Clear list')));
+  if (!items.length) list.append(el('div', { className: 'note' }, 'No downloads yet.'));
+  for (const d of items) {
+    const pct = d.total ? Math.min(100, Math.round((d.received / d.total) * 100)) : 0;
+    const status = d.state === 'progressing' ? `${size(d.received)}${d.total ? ' of ' + size(d.total) : ''}` :
+      d.state === 'completed' ? `${size(d.received)} · Completed` : d.state === 'cancelled' ? 'Cancelled' : d.state === 'paused' ? 'Paused' : 'Failed';
+    const row = el('div', { className: 'row' },
+      el('span', { className: 'a' }, d.name), el('span', { className: 'b' }, status));
+    if (d.state === 'progressing') row.append(el('div', { className: 'bar' }, el('i', { style: `width:${pct}%` })));
+    const acts = el('div', { className: 'actions' });
+    if (d.state === 'completed') {
+      acts.append(el('button', { onclick: async () => { const r = await dex.downloadsOpen(d.id); if (!r.ok) toast(r.error); } }, 'Open'),
+        el('button', { onclick: async () => { const r = await dex.downloadsShow(d.id); if (!r.ok) toast(r.error); } }, 'Show in folder'));
+    } else if (d.state === 'progressing') {
+      acts.append(el('button', { onclick: () => dex.downloadsCancel(d.id) }, 'Cancel'));
+    }
+    list.append(row, acts);
   }
 }
 
 // ---------- Google sync ----------
 async function refreshSync() {
-  const res = await window.dex.syncStatus();
+  const res = await dex.syncStatus();
   if (res.ok) sync = res.data;
-  const btn = $('acct');
-  btn.textContent = sync.signedIn ? sync.email || 'Signed in' : 'Sign in';
+  const btn = $('acctbtn');
   btn.classList.toggle('on', sync.signedIn);
   btn.title = sync.signedIn ? 'Google sync: ' + sync.email : 'Sign in with Google to sync history';
 }
@@ -265,7 +513,7 @@ async function refreshSync() {
 async function signIn() {
   if (!sync.configured) { toast('Google sync is not set up in this build'); return; }
   toast('Finish signing in with Google in your browser');
-  const res = await window.dex.syncSignIn();
+  const res = await dex.syncSignIn();
   await refreshSync();
   toast(res.ok ? 'Signed in as ' + res.data : 'Sign-in failed: ' + res.error);
 }
@@ -274,57 +522,340 @@ async function showAccount() {
   await refreshSync();
   if (!sync.signedIn) { await signIn(); return; }
   const body = openPanel('account', 'Google sync');
-  body.append(el('div', { className: 'note' }, 'Signed in as ' + sync.email));
-  const actions = el('div', { className: 'actions' });
-  const hist = el('button', {}, 'Synced history');
-  hist.addEventListener('click', () => showHistory('cloud'));
-  const out = el('button', {}, 'Sign out');
-  out.addEventListener('click', async () => { await window.dex.syncSignOut(); await refreshSync(); closePanel(); toast('Signed out'); });
-  actions.append(hist, out);
-  body.append(actions);
+  body.append(el('div', { className: 'note' }, 'Signed in as ' + sync.email),
+    el('div', { className: 'actions' },
+      el('button', { onclick: () => showLibrary('cloud') }, 'Synced history'),
+      el('button', { onclick: async () => { await dex.syncSignOut(); await refreshSync(); closePanel(); toast('Signed out'); } }, 'Sign out')));
 }
 
-// ---------- wiring ----------
-function perform(action) {
-  if (!active) return;
-  const v = active.view;
-  switch (action) {
-    case 'new-tab': createTab(); break;
-    case 'close-tab': closeTab(active); break;
-    case 'focus-address': $('address').focus(); $('address').select(); break;
-    case 'reload': active.loading ? v.stop() : v.reload(); break;
-    case 'history': panelKind === 'history' ? closePanel() : showHistory('local'); break;
-    case 'back': if (active.ready && v.canGoBack()) v.goBack(); break;
-    case 'forward': if (active.ready && v.canGoForward()) v.goForward(); break;
-    case 'devtools': v.openDevTools(); break;
-    case 'next-tab': activateTab(tabs[(tabs.indexOf(active) + 1) % tabs.length]); break;
-    case 'prev-tab': activateTab(tabs[(tabs.indexOf(active) - 1 + tabs.length) % tabs.length]); break;
-    case 'zoom-in': active.zoom = Math.min(active.zoom + 0.5, 5); v.setZoomLevel(active.zoom); break;
-    case 'zoom-out': active.zoom = Math.max(active.zoom - 0.5, -3); v.setZoomLevel(active.zoom); break;
-    case 'zoom-reset': active.zoom = 0; v.setZoomLevel(0); break;
+// ---------- Shields ----------
+function switchEl(on, onChange) {
+  const s = el('div', { className: 'switch' + (on ? ' on' : ''), role: 'switch', tabIndex: 0 });
+  s.addEventListener('click', () => { on = !on; s.classList.toggle('on', on); onChange(on); });
+  return s;
+}
+
+async function showShields() {
+  const pop = $('shields-pop');
+  if (!pop.hidden) { closePops(); return; }
+  closePops();
+  pop.replaceChildren();
+  const tab = active;
+  if (!tab || !isWeb(tab.url)) {
+    pop.append(el('div', { className: 'note' }, 'Shields work on websites. Open a page to see what DexBrowse blocks.'),
+      el('div', { className: 'sh-foot' }, el('button', { onclick: () => { closePops(); openSettings('shields'); } }, 'Shields settings')));
+    pop.hidden = false;
+    return;
+  }
+  const host = new URL(tab.url).hostname;
+  const res = await dex.shieldsSite(host, tab.wcId);
+  if (!res.ok) { toast(res.error); return; }
+  const { rule, count } = res.data;
+  const apply = async (patch) => {
+    await dex.shieldsSiteSet(host, patch);
+    if (tab.ready) tab.view.reload();
+    setTimeout(showShieldsAgain, 400);
+  };
+  const showShieldsAgain = () => { $('shields-pop').hidden = true; showShields(); };
+
+  pop.append(el('div', { className: 'sh-head' },
+    iconEl('shield'),
+    el('div', { className: 'host' }, host, el('div', { className: 'state' + (rule.up ? '' : ' off') }, rule.up ? 'Shields are UP for this site' : 'Shields are DOWN for this site')),
+    switchEl(rule.up, (on) => apply({ off: !on }))));
+  pop.append(el('div', { className: 'sh-count' }, el('b', {}, String(count || tab.blocked || 0)), el('span', {}, 'trackers, ads and scripts blocked')));
+  const rowOf = (label, on, key) => {
+    const r = el('div', { className: 'sh-row' + (rule.up ? '' : ' dim') }, el('div', { className: 'l' }, label), switchEl(!!on, (v) => apply({ [key]: v })));
+    return r;
+  };
+  pop.append(rowOf('Block trackers & ads', rule.ads, 'ads'),
+    rowOf('Upgrade connections to HTTPS', rule.https, 'https'),
+    rowOf('Block third-party cookies', rule.cookies, 'cookies'),
+    rowOf('Block scripts', rule.scripts, 'scripts'));
+  pop.append(el('div', { className: 'sh-foot' },
+    el('button', { onclick: () => { closePops(); openSettings('shields'); } }, 'Advanced settings')));
+  pop.hidden = false;
+}
+
+// ---------- menu and popovers ----------
+function closePops() {
+  for (const id of ['menu', 'shields-pop', 'ctx']) $(id).hidden = true;
+}
+
+function showMenu() {
+  const menu = $('menu');
+  if (!menu.hidden) { closePops(); return; }
+  closePops();
+  menu.replaceChildren();
+  const item = (label, hint, fn) => menu.append(el('button', { className: 'item', onclick: () => { closePops(); fn(); } }, label, hint ? el('span', { className: 'k' }, hint) : null));
+  item('New tab', 'Ctrl+T', () => createTab());
+  item('New window', 'Ctrl+N', () => dex.windowNew(false));
+  item('New private window', 'Ctrl+Shift+N', () => dex.windowNew(true));
+  menu.append(el('hr'));
+  item('Bookmarks', 'Ctrl+Shift+O', () => showLibrary('bookmarks'));
+  item('History', 'Ctrl+H', () => showLibrary('history'));
+  item('Downloads', 'Ctrl+J', () => showLibrary('downloads'));
+  item('Reading list', 'Ctrl+Shift+S', () => showLibrary('reading'));
+  item('Passwords', '', () => openSettings('passwords'));
+  menu.append(el('hr'));
+  const pct = () => Math.round(Math.pow(1.2, active ? active.zoom : 0) * 100) + '%';
+  const label = el('span', {}, 'Zoom ' + pct());
+  menu.append(el('div', { className: 'zoomrow' }, label,
+    el('button', { onclick: () => { perform('zoom-out'); label.textContent = 'Zoom ' + pct(); } }, '−'),
+    el('button', { onclick: () => { perform('zoom-reset'); label.textContent = 'Zoom ' + pct(); } }, 'Reset'),
+    el('button', { onclick: () => { perform('zoom-in'); label.textContent = 'Zoom ' + pct(); } }, '+')));
+  item('Find in page', 'Ctrl+F', () => perform('find'));
+  item('Print…', 'Ctrl+P', () => perform('print'));
+  item('Save page as PDF', '', () => savePdf());
+  item('Developer tools', 'F12', () => perform('devtools'));
+  menu.append(el('hr'));
+  if (lockEnabled) item('Lock DexBrowse', 'Ctrl+Shift+L', () => dex.lockNow());
+  item(sync.signedIn ? 'Google sync: ' + sync.email : 'Sign in with Google…', '', () => showAccount());
+  item('Settings', 'Ctrl+,', () => openSettings('appearance'));
+  item('Exit', '', () => dex.windowQuit());
+  menu.hidden = false;
+}
+
+// ---------- find, print ----------
+function openFind() {
+  $('findbar').hidden = false;
+  $('findinput').focus();
+  $('findinput').select();
+}
+function closeFind() {
+  $('findbar').hidden = true;
+  $('findcount').textContent = '';
+  if (active && active.ready) active.view.stopFindInPage('clearSelection');
+}
+function findNext(forward) {
+  const text = $('findinput').value;
+  if (!active || !active.ready || !text) { $('findcount').textContent = ''; return; }
+  active.view.findInPage(text, { forward, findNext: true });
+}
+
+function bytesToB64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+async function savePdf() {
+  if (!active || !active.ready) return;
+  try {
+    const data = await active.view.printToPDF({});
+    const res = await dex.savePdf(bytesToB64(new Uint8Array(data)), active.title || 'page');
+    if (res.ok && res.data) toast('Saved PDF');
+  } catch (e) {
+    toast('Could not save PDF');
   }
 }
 
-$('newtab').addEventListener('click', () => createTab());
-$('back').addEventListener('click', () => perform('back'));
-$('forward').addEventListener('click', () => perform('forward'));
-$('reload').addEventListener('click', () => perform('reload'));
-$('home').addEventListener('click', () => active && active.view.loadURL(START));
-$('uabtn').addEventListener('click', () => (panelKind === 'ua' ? closePanel() : showUserAgents()));
-$('histbtn').addEventListener('click', () => (panelKind === 'history' ? closePanel() : showHistory('local')));
-$('acct').addEventListener('click', showAccount);
-$('panel-close').addEventListener('click', closePanel);
-$('address').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') go($('address').value);
-  if (e.key === 'Escape') { updateToolbar(); active && active.view.focus(); }
-});
-$('address').addEventListener('focus', () => $('address').select());
+// ---------- saved logins ----------
+async function onGuestMessage(tab, e) {
+  const data = e.args && e.args[0];
+  if (!data || PRIV) return;
+  const current = (() => { try { return new URL(tab.view.getURL()).origin; } catch (_) { return ''; } })();
+  if (data.origin !== current) return;
+  if (e.channel === 'login-request') {
+    if (!cfg.settings.autofill || !(/^https:/.test(data.origin) || /^http:\/\/(localhost|127\.0\.0\.1)/.test(data.origin))) return;
+    const res = await dex.loginsFill(data.origin);
+    if (res.ok && res.data) tab.view.send('login-fill', res.data);
+  } else if (e.channel === 'login-submit') {
+    if (!cfg.settings.savePasswords || cfg.settings.neverSave.includes(data.origin)) return;
+    const now = Date.now();
+    if (pendingSave && pendingSave.data.password === data.password && pendingSave.data.origin === data.origin && now - pendingSave.at < 3000) return;
+    const known = await dex.loginsList();
+    const existing = known.ok && known.data.some((l) => l.origin === data.origin && l.username === data.username);
+    pendingSave = { data, at: now, update: existing };
+    $('savetext').textContent = `${existing ? 'Update' : 'Save'} password for ${data.username || 'this account'} on ${hostOf(data.origin)}?`;
+    $('savego').textContent = existing ? 'Update' : 'Save';
+    $('savebar').hidden = false;
+    clearTimeout(onGuestMessage.timer);
+    onGuestMessage.timer = setTimeout(() => { $('savebar').hidden = true; pendingSave = null; }, 60000);
+  }
+}
 
-window.dex.on('shortcut', perform);
-window.dex.on('open-tab', (url) => createTab(url));
-window.dex.on('download', ({ name, state }) => {
-  toast(state === 'completed' ? `Downloaded ${name}` : `Download ${state}: ${name}`);
-});
+// ---------- settings page hooks ----------
+function closeSettings() {
+  settingsOpen = false;
+  $('settings').hidden = true;
+}
+function openSettings(section) {
+  settingsOpen = true;
+  closePops();
+  closePanel();
+  $('settings').hidden = false;
+  renderSettings(section);
+}
 
-refreshSync();
-createTab();
+// ---------- lock ----------
+function showLock(state) {
+  document.body.classList.toggle('locked', state);
+  $('lock').hidden = !state;
+  if (state) {
+    closePops(); closePanel(); closeSettings();
+    $('lockinput').value = '';
+    $('lockerr').textContent = '';
+    setTimeout(() => $('lockinput').focus(), 50);
+  }
+}
+async function tryUnlock() {
+  const res = await dex.lockUnlock($('lockinput').value);
+  if (!res.ok) { $('lockerr').textContent = res.error; $('lockinput').select(); return; }
+  showLock(false);
+}
+
+// ---------- shortcuts ----------
+function perform(action) {
+  if (action.startsWith('tab-')) {
+    const n = Number(action.slice(4));
+    const target = n === 9 ? tabs[tabs.length - 1] : tabs[n - 1];
+    if (target) activateTab(target);
+    return;
+  }
+  if (action === 'new-tab') { createTab(); return; }
+  if (action === 'new-window') { dex.windowNew(false); return; }
+  if (action === 'new-private-window') { dex.windowNew(true); return; }
+  if (action === 'history') { panelKind === 'library' && libTab === 'history' ? closePanel() : showLibrary('history'); return; }
+  if (action === 'downloads') { showLibrary('downloads'); return; }
+  if (action === 'bookmarks') { showLibrary('bookmarks'); return; }
+  if (action === 'reading-list') { showLibrary('reading'); return; }
+  if (action === 'settings') { openSettings('appearance'); return; }
+  if (action === 'clear-data') { openSettings('data'); return; }
+  if (action === 'lock') { dex.lockNow(); return; }
+  if (action === 'toggle-bookmarks-bar') { dex.settingsSet({ bookmarksBar: !cfg.settings.bookmarksBar }); return; }
+  if (action === 'focus-address') { $('address').focus(); $('address').select(); return; }
+  if (action === 'reopen-tab') { const u = closed.pop(); if (u) createTab(u); return; }
+  if (!active) return;
+  const v = active.view;
+  const ready = active.ready;
+  switch (action) {
+    case 'close-tab': if (!active.pinned) closeTab(active); break;
+    case 'reload': if (ready) (active.loading ? v.stop() : v.reload()); break;
+    case 'back': if (ready && v.canGoBack()) v.goBack(); break;
+    case 'forward': if (ready && v.canGoForward()) v.goForward(); break;
+    case 'devtools': if (ready) v.openDevTools(); break;
+    case 'find': openFind(); break;
+    case 'print': if (ready) v.print(); break;
+    case 'bookmark': toggleBookmark(); break;
+    case 'next-tab': activateTab(tabs[(tabs.indexOf(active) + 1) % tabs.length]); break;
+    case 'prev-tab': activateTab(tabs[(tabs.indexOf(active) - 1 + tabs.length) % tabs.length]); break;
+    case 'zoom-in': active.zoom = Math.min(active.zoom + 0.5, 5); if (ready) v.setZoomLevel(active.zoom); break;
+    case 'zoom-out': active.zoom = Math.max(active.zoom - 0.5, -3); if (ready) v.setZoomLevel(active.zoom); break;
+    case 'zoom-reset': active.zoom = 0; if (ready) v.setZoomLevel(0); break;
+  }
+}
+
+let sessionTimer = null;
+function scheduleSessionSave() {
+  clearTimeout(sessionTimer);
+  sessionTimer = setTimeout(() => dex.sessionSave(tabs.map((t) => t.url).filter(isWeb)), 1000);
+}
+
+// ---------- boot ----------
+async function boot() {
+  const res = await dex.config();
+  cfg = res.data;
+  lockEnabled = cfg.lockEnabled;
+  document.body.classList.toggle('private', PRIV);
+  $('privbadge').hidden = !PRIV;
+  applyTheme();
+  matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
+
+  for (const [id, icon] of [['newtab', 'plus'], ['back', 'back'], ['forward', 'forward'], ['reload', 'reload'], ['siteicon', 'globe'],
+    ['star', 'star'], ['shieldbtn', 'shield'], ['acctbtn', 'user'], ['menubtn', 'menu'], ['findprev', 'up'], ['findnext', 'down'],
+    ['findclose', 'close'], ['savelater', 'close'], ['panel-close', 'close'], ['lockicon', 'lock']]) setIcon(id, icon);
+
+  $('newtab').addEventListener('click', () => createTab());
+  $('back').addEventListener('click', () => perform('back'));
+  $('forward').addEventListener('click', () => perform('forward'));
+  $('reload').addEventListener('click', () => perform('reload'));
+  $('star').addEventListener('click', toggleBookmark);
+  $('shieldbtn').addEventListener('click', showShields);
+  $('acctbtn').addEventListener('click', showAccount);
+  $('menubtn').addEventListener('click', showMenu);
+  $('panel-close').addEventListener('click', closePanel);
+  $('address').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') go($('address').value);
+    if (e.key === 'Escape') { updateToolbar(); active && active.view.focus(); }
+  });
+  $('address').addEventListener('focus', () => $('address').select());
+  $('findinput').addEventListener('input', () => findNext(true));
+  $('findinput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') findNext(!e.shiftKey);
+    if (e.key === 'Escape') closeFind();
+  });
+  $('findprev').addEventListener('click', () => findNext(false));
+  $('findnext').addEventListener('click', () => findNext(true));
+  $('findclose').addEventListener('click', closeFind);
+  $('savego').addEventListener('click', async () => {
+    if (!pendingSave) return;
+    const r = await dex.loginsSave(pendingSave.data);
+    toast(r.ok ? 'Password saved' : r.error);
+    pendingSave = null;
+    $('savebar').hidden = true;
+  });
+  $('savenever').addEventListener('click', async () => {
+    if (pendingSave) await dex.loginsNeverAdd(pendingSave.data.origin);
+    cfg.settings.neverSave = (await dex.loginsNever()).data || [];
+    pendingSave = null;
+    $('savebar').hidden = true;
+  });
+  $('savelater').addEventListener('click', () => { pendingSave = null; $('savebar').hidden = true; });
+  $('lockgo').addEventListener('click', tryUnlock);
+  $('lockinput').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
+  $('lockreset').addEventListener('click', async () => {
+    const r = await dex.lockReset();
+    if (r.ok && r.data) { lockEnabled = false; showLock(false); toast('Passcode removed and data erased'); }
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.pop') || e.target.closest('#menubtn') || e.target.closest('#shieldbtn')) return;
+    closePops();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closePops(); if (!$('findbar').hidden) closeFind(); }
+  });
+  let lastPing = 0;
+  document.addEventListener('mousemove', () => {
+    if (lockEnabled && Date.now() - lastPing > 5000) { lastPing = Date.now(); dex.activity(); }
+  });
+
+  dex.on('shortcut', perform);
+  dex.on('open-tab', (url) => createTab(url));
+  dex.on('blocked', ({ id, count }) => {
+    pendingBlocked.set(id, count);
+    const t = tabs.find((x) => x.wcId === id);
+    if (t) { t.blocked = count; if (t === active) updateShieldBadge(); }
+  });
+  dex.on('download-update', (d) => {
+    dlCache.set(d.id, d);
+    if (d.state === 'completed') toast(`Downloaded ${d.name}`);
+    else if (d.state === 'cancelled' || d.state === 'interrupted') toast(`Download ${d.state}: ${d.name}`);
+    if (panelKind === 'library' && libTab === 'downloads') paintDownloads($('panel-body').lastChild);
+  });
+  dex.on('settings-changed', async (settings) => {
+    cfg.settings = settings;
+    applyTheme();
+    renderBookmarkBar();
+    if (active) updateToolbar();
+    if (settingsOpen) renderSettings(currentSection());
+  });
+  dex.on('lock', async (state) => {
+    if (state) { lockEnabled = true; showLock(true); }
+    else { const s = await dex.lockStatus(); lockEnabled = !!(s.data && s.data.enabled); showLock(false); }
+  });
+
+  const lock = await dex.lockStatus();
+  lockEnabled = !!(lock.data && lock.data.enabled);
+  if (lock.data && lock.data.locked) showLock(true);
+
+  await refreshBookmarks();
+  await refreshSync();
+
+  const restore = PRIV ? [] : ((await dex.sessionLoad()).data || []);
+  if (restore.length) {
+    restore.forEach((u, i) => createTab(u, i === 0));
+  } else {
+    const home = await homeUrl();
+    createTab(isStart(home) ? 'dex://start' : home);
+  }
+}

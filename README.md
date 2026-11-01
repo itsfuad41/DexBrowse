@@ -61,13 +61,24 @@ DexBrowse By Fuad
 
 ## PC App
 
-`desktop/` is the DexBrowse PC browser (Electron, so it runs real Chromium): tabs, address bar,
-the same user agents, local history and Google sync. Windows installer: `DexBrowse-PC-Setup.exe`.
+`desktop/` is the DexBrowse PC browser (Electron, so it runs real Chromium) with a Brave-style interface.
+Windows installer: `DexBrowse-PC-Setup.exe`. Run locally: `cd desktop && npm install && npm start`
 
-Shortcuts: Ctrl+T new tab, Ctrl+W close, Ctrl+L address bar, Ctrl+R / F5 reload,
-Ctrl+H history, Ctrl+Tab switch tabs, Alt+Left/Right back/forward, Ctrl +/-/0 zoom, F12 DevTools.
+- **Shields** (shield button in the toolbar): per-site and global blocking of ads and trackers, HTTPS upgrades,
+  third-party cookies and scripts, Do Not Track / Global Privacy Control, WebRTC IP protection, blocked counters.
+- **Private windows** (Ctrl+Shift+N): separate in-memory session, no history, cookies, bookmarks, saved logins or sync.
+- **Passcode lock**: scrypt-hashed passcode, lock on start, auto-lock timer, Ctrl+Shift+L.
+- **Saved logins**: offer to save, autofill, encrypted with the operating system keystore.
+- **Bookmarks** and bookmarks bar, **reading list**, **history**, **downloads manager** (Library panel).
+- **Tabs**: pinned tabs, mute, duplicate, reopen closed tab, session restore, page context menu.
+- **Find in page**, print, save as PDF, zoom, developer tools.
+- **Settings page** (Ctrl+,): appearance, Shields, search engine (Brave, Google, DuckDuckGo, Bing, Startpage, Ecosia,
+  Perplexity, Yahoo), startup, passwords, security, site permissions, downloads, 20 user agents, Google sync, clear data.
+- **Start page** with clock, privacy stats and top sites.
 
-Run locally: `cd desktop && npm install && npm start`
+Shortcuts: Ctrl+T new tab, Ctrl+W close, Ctrl+Shift+T reopen, Ctrl+L address bar, Ctrl+D bookmark, Ctrl+F find,
+Ctrl+P print, Ctrl+H history, Ctrl+J downloads, Ctrl+Shift+O bookmarks, Ctrl+Shift+B bookmarks bar, Ctrl+, settings,
+Ctrl+Tab / Ctrl+1-9 switch tabs, Alt+Left/Right back/forward, Ctrl +/-/0 zoom, F12 developer tools.
 
 ## Google sign-in and history sync
 
@@ -95,4 +106,4 @@ Web SDK configuration and add the desktop client ID to the safelist.
 
 ## Releases
 
-Push a tag such as `v2.13.0` to build and publish both the APK and the PC installer to GitHub Releases.
+Push a tag such as `v2.14.0` to build and publish both the APK and the PC installer to GitHub Releases.

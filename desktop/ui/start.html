@@ -3,47 +3,104 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DexBrowse Start</title>
+  <title>New tab</title>
   <style>
+    :root { --text:#F4F5F9; --muted:#B7BAC8; --card:rgba(255,255,255,.09); --line:rgba(255,255,255,.16); --accent:#FB542B;
+            --bg1:#2A1646; --bg2:#0E1226; --bg3:#3A1B2E; }
+    :root[data-theme="light"] { --text:#1B1C22; --muted:#555A6B; --card:rgba(255,255,255,.7); --line:rgba(0,0,0,.12); --bg1:#FFE6DC; --bg2:#E7ECFF; --bg3:#FFF4EA; }
+    :root[data-p="1"] { --accent:#A78BFA; --bg1:#2B1458; --bg2:#0E0A1E; --bg3:#1E1040; --text:#F4F0FF; --card:rgba(255,255,255,.08); }
+    * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      background: radial-gradient(circle at 50% 30%, #1E1B4B, #0B1220 60%);
-      color: #E2E8F0; font-family: system-ui, "Segoe UI", sans-serif;
+      font-family: system-ui, "Segoe UI", sans-serif; color: var(--text); display: flex; flex-direction: column; align-items: center;
+      background: radial-gradient(circle at 15% 10%, var(--bg1), transparent 55%), radial-gradient(circle at 85% 90%, var(--bg3), transparent 50%), var(--bg2);
+      overflow: auto;
     }
-    h1 { font-size: 44px; margin: 0 0 6px; letter-spacing: .5px; }
-    p { margin: 0 0 28px; color: #94A3B8; }
-    form { width: min(640px, 86vw); display: flex; gap: 8px; }
+    .wrap { width: min(860px, 92vw); padding: 7vh 0 40px; display: flex; flex-direction: column; align-items: center; }
+    .clock { font-size: clamp(56px, 11vw, 104px); font-weight: 300; letter-spacing: -2px; line-height: 1; }
+    .date { color: var(--muted); margin: 6px 0 26px; font-size: 16px; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; width: 100%; margin-bottom: 26px; }
+    .stat { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; backdrop-filter: blur(8px); }
+    .stat b { display: block; font-size: 28px; color: var(--accent); font-weight: 600; }
+    .stat span { color: var(--muted); font-size: 13px; }
+    form { width: 100%; display: flex; gap: 8px; }
     input {
-      flex: 1; padding: 15px 20px; border-radius: 28px; border: 1px solid #334155;
-      background: #1E293B; color: #fff; font-size: 16px; outline: none;
+      flex: 1; padding: 16px 22px; border-radius: 30px; border: 1px solid var(--line); background: var(--card);
+      color: var(--text); font-size: 16px; outline: none; backdrop-filter: blur(8px);
     }
-    input:focus { border-color: #818CF8; }
-    button {
-      padding: 0 22px; border: 0; border-radius: 28px; background: #6366F1; color: #fff;
-      font-size: 15px; cursor: pointer;
-    }
-    .links { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
-    .links a {
-      color: #CBD5E1; text-decoration: none; padding: 10px 16px; border-radius: 12px;
-      background: #1E293B; border: 1px solid #334155; font-size: 14px;
-    }
-    .links a:hover { border-color: #818CF8; }
+    input:focus { border-color: var(--accent); }
+    button { padding: 0 26px; border: 0; border-radius: 30px; background: var(--accent); color: #fff; font-size: 15px; cursor: pointer; }
+    .via { color: var(--muted); font-size: 12px; margin: 10px 0 26px; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 12px; width: 100%; }
+    .tile { text-decoration: none; color: var(--text); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px; border-radius: 16px; }
+    .tile:hover { background: var(--card); }
+    .ico { width: 52px; height: 52px; border-radius: 16px; display: grid; place-items: center; font-size: 22px; font-weight: 700; color: #fff; }
+    .tile span { font-size: 12.5px; max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .priv { text-align: center; max-width: 560px; line-height: 1.6; color: var(--muted); margin-top: 8px; }
+    .priv h2 { color: var(--text); margin: 0 0 8px; }
+    @media (max-width: 560px) { .stats { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <h1>DexBrowse</h1>
-  <p>By Fuad &middot; Chromium for desktop</p>
-  <form action="https://www.google.com/search" method="get">
-    <input name="q" placeholder="Search Google" autofocus autocomplete="off">
-    <button type="submit">Search</button>
-  </form>
-  <div class="links">
-    <a href="https://www.google.com">Google</a>
-    <a href="https://www.youtube.com">YouTube</a>
-    <a href="https://github.com">GitHub</a>
-    <a href="https://duckduckgo.com">DuckDuckGo</a>
-    <a href="https://www.perplexity.ai">Perplexity</a>
+  <div class="wrap">
+    <div class="clock" id="clock"></div>
+    <div class="date" id="date"></div>
+    <div class="stats" id="stats"></div>
+    <form id="f"><input id="q" placeholder="" autofocus autocomplete="off"><button type="submit">Search</button></form>
+    <div class="via" id="via"></div>
+    <div class="tiles" id="tiles"></div>
+    <div class="priv" id="priv" hidden>
+      <h2>This is a private window</h2>
+      DexBrowse won't save your history, cookies or logins from this window, and nothing is synced. Shields still block trackers and ads.
+    </div>
   </div>
+  <script>
+    var P = new URLSearchParams(location.search);
+    var isPriv = P.get('p') === '1';
+    document.documentElement.dataset.theme = P.get('t') || 'dark';
+    if (isPriv) document.documentElement.dataset.p = '1';
+    var engine = P.get('e') || 'https://search.brave.com/search?q=';
+    var name = P.get('n') || 'Brave Search';
+    document.getElementById('q').placeholder = 'Search with ' + name;
+    document.getElementById('via').textContent = 'Search is private by default with ' + name;
+    document.getElementById('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var v = document.getElementById('q').value.trim();
+      if (!v) return;
+      var looksUrl = !/\s/.test(v) && /^[^\s/]+\.[a-z]{2,}([/?#].*)?$/i.test(v);
+      location.href = /^https?:\/\//i.test(v) ? v : looksUrl ? 'https://' + v : engine + encodeURIComponent(v);
+    });
+
+    function tick() {
+      var d = new Date();
+      document.getElementById('clock').textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      document.getElementById('date').textContent = d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+    }
+    tick(); setInterval(tick, 10000);
+
+    var ads = +P.get('ads') || 0, trk = +P.get('trk') || 0, up = +P.get('up') || 0, blocked = ads + trk;
+    function fmtTime(sec) { return sec < 90 ? Math.round(sec) + ' seconds' : sec < 5400 ? Math.round(sec / 60) + ' minutes' : (sec / 3600).toFixed(1) + ' hours'; }
+    function fmtMB(mb) { return mb < 1024 ? mb.toFixed(mb < 10 ? 1 : 0) + ' MB' : (mb / 1024).toFixed(1) + ' GB'; }
+    var stats = document.getElementById('stats');
+    [[blocked.toLocaleString(), 'Trackers & ads blocked'], ['≈ ' + fmtMB(blocked * 0.045), 'Bandwidth saved'], ['≈ ' + fmtTime(blocked * 0.06), 'Time saved']].forEach(function (s) {
+      var d = document.createElement('div'); d.className = 'stat';
+      var b = document.createElement('b'); b.textContent = s[0];
+      var sp = document.createElement('span'); sp.textContent = s[1];
+      d.append(b, sp); stats.append(d);
+    });
+
+    var tiles = []; try { tiles = JSON.parse(P.get('tiles') || '[]'); } catch (e) {}
+    if (!tiles.length) tiles = [['YouTube', 'https://www.youtube.com'], ['GitHub', 'https://github.com'], ['Wikipedia', 'https://www.wikipedia.org'],
+      ['Reddit', 'https://www.reddit.com'], ['X', 'https://x.com'], ['Brave', 'https://brave.com']].map(function (a) { return { title: a[0], url: a[1] }; });
+    var colors = ['#FB542B', '#6366F1', '#10B981', '#F59E0B', '#EC4899', '#0EA5E9', '#8B5CF6', '#14B8A6'];
+    if (isPriv) { document.getElementById('priv').hidden = false; document.getElementById('stats').style.marginTop = '8px'; }
+    else tiles.forEach(function (t, i) {
+      var a = document.createElement('a'); a.className = 'tile'; a.href = t.url;
+      var ico = document.createElement('div'); ico.className = 'ico'; ico.style.background = colors[i % colors.length];
+      ico.textContent = (t.title[0] || '?').toUpperCase();
+      var s = document.createElement('span'); s.textContent = t.title;
+      a.append(ico, s); document.getElementById('tiles').append(a);
+    });
+  </script>
 </body>
 </html>

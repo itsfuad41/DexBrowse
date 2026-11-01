@@ -10,32 +10,70 @@
 <body>
   <div id="tabbar">
     <div id="tabs"></div>
-    <button id="newtab" title="New tab (Ctrl+T)">+</button>
+    <button id="newtab" class="icon" title="New tab (Ctrl+T)"></button>
+    <span id="privbadge" hidden>Private</span>
   </div>
 
   <div id="toolbar">
-    <button id="back" title="Back (Alt+Left)">&#9664;</button>
-    <button id="forward" title="Forward (Alt+Right)">&#9654;</button>
-    <button id="reload" title="Reload (Ctrl+R)">&#10227;</button>
-    <button id="home" title="Home">&#8962;</button>
-    <input id="address" type="text" spellcheck="false" autocomplete="off" placeholder="Search Google or type a URL">
-    <button id="uabtn" title="User agent">UA</button>
-    <button id="histbtn" title="History (Ctrl+H)">History</button>
-    <button id="acct" title="Google sync">Sign in</button>
+    <button id="back" class="icon" title="Back (Alt+Left)"></button>
+    <button id="forward" class="icon" title="Forward (Alt+Right)"></button>
+    <button id="reload" class="icon" title="Reload (Ctrl+R)"></button>
+    <div id="addrwrap">
+      <span id="siteicon" class="icon"></span>
+      <input id="address" type="text" spellcheck="false" autocomplete="off" placeholder="Search or enter address">
+      <button id="star" class="icon" title="Bookmark this page (Ctrl+D)"></button>
+    </div>
+    <button id="shieldbtn" class="icon" title="Shields"><span id="shieldcount" class="badge" hidden></span></button>
+    <button id="acctbtn" class="icon" title="Google sync"></button>
+    <button id="menubtn" class="icon" title="Menu"></button>
+  </div>
+
+  <div id="bmbar" hidden></div>
+
+  <div id="findbar" hidden>
+    <input id="findinput" type="text" placeholder="Find in page" spellcheck="false">
+    <span id="findcount"></span>
+    <button id="findprev" class="icon" title="Previous (Shift+Enter)"></button>
+    <button id="findnext" class="icon" title="Next (Enter)"></button>
+    <button id="findclose" class="icon" title="Close (Esc)"></button>
+  </div>
+
+  <div id="savebar" hidden>
+    <span id="savetext"></span>
+    <button id="savego" class="primary">Save</button>
+    <button id="savenever">Never for this site</button>
+    <button id="savelater" class="icon" title="Not now"></button>
   </div>
 
   <div id="progress"></div>
   <div id="views"></div>
+  <div id="settings" hidden></div>
 
   <aside id="panel" hidden>
     <header>
       <h2 id="panel-title"></h2>
-      <button id="panel-close" title="Close">&times;</button>
+      <button id="panel-close" class="icon" title="Close"></button>
     </header>
     <div id="panel-body"></div>
   </aside>
 
+  <div id="shields-pop" class="pop" hidden></div>
+  <div id="menu" class="pop" hidden></div>
+  <div id="ctx" class="pop" hidden></div>
+
+  <div id="lock" hidden>
+    <div class="lockbox">
+      <div id="lockicon"></div>
+      <h1>DexBrowse is locked</h1>
+      <input id="lockinput" type="password" placeholder="Passcode" autocomplete="off">
+      <div id="lockerr"></div>
+      <button id="lockgo" class="primary">Unlock</button>
+      <button id="lockreset" class="link">Forgot passcode?</button>
+    </div>
+  </div>
+
   <div id="toast" hidden></div>
   <script src="app.js"></script>
+  <script src="settings.js"></script>
 </body>
 </html>
