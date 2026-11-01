@@ -12,6 +12,7 @@ const { createShields } = require('./shields');
 const { createExtensions } = require('./extensions');
 const { createProfiles } = require('./profiles');
 const importer = require('./importer');
+const { createUpdater } = require('./updater');
 
 // Look like a normal browser to bot checks (navigator.webdriver stays false).
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
@@ -86,6 +87,8 @@ const DEFAULTS = {
   autofill: true,
   savePasswords: true,
   autoLockMinutes: 0,
+  lockShortcut: 'Ctrl+Shift+L',
+  autoUpdate: true,
   neverSave: [],
   lock: null,
   shields: { enabled: true, ads: true, https: true, cookies: true, gpc: true }
@@ -111,10 +114,25 @@ let blockedUntil = 0;
 
 const publicSettings = () => {
   const copy = JSON.parse(JSON.stringify(settings));
-  delete copy.lock;
+  delete copy.lock; // legacy field
   return copy;
 };
 const saveSettings = () => writeJson('settings.json', settings);
+
+const RESERVED_COMBOS = new Set(['Ctrl+Shift+N', 'Ctrl+Shift+T', 'Ctrl+Shift+B', 'Ctrl+Shift+O', 'Ctrl+Shift+S', 'Ctrl+Shift+Delete', 'Ctrl+Shift+I']);
+function validLockShortcut(c) {
+  if (!/^Ctrl\+(?:Alt\+Shift|Alt|Shift)\+(?:[A-Z0-9]|F(?:[1-9]|1[0-2]))$/.test(c)) return false;
+  return !RESERVED_COMBOS.has(c);
+}
+function comboOfInput(input) {
+  const parts = [];
+  if (input.control || input.meta) parts.push('Ctrl');
+  if (input.alt) parts.push('Alt');
+  if (input.shift) parts.push('Shift');
+  const k = input.key || '';
+  parts.push(k.length === 1 ? k.toUpperCase() : k);
+  return parts.join('+');
+}
 
 function sanitize(patch) {
   const out = {};
@@ -123,8 +141,9 @@ function sanitize(patch) {
   if (patch.engine in ENGINES) out.engine = patch.engine;
   if (['start', 'restore', 'homepage'].includes(patch.startup)) out.startup = patch.startup;
   if (typeof patch.homepage === 'string') out.homepage = patch.homepage.slice(0, 500);
-  if ([0, 5, 15, 30, 60].includes(patch.autoLockMinutes)) out.autoLockMinutes = patch.autoLockMinutes;
-  ['bookmarksBar', 'askDownload', 'webrtc', 'autofill', 'savePasswords'].forEach(bool);
+  if ([0, 1, 2, 5, 10, 15, 30, 60].includes(patch.autoLockMinutes)) out.autoLockMinutes = patch.autoLockMinutes;
+  if (typeof patch.lockShortcut === 'string' && validLockShortcut(patch.lockShortcut)) out.lockShortcut = patch.lockShortcut;
+  ['bookmarksBar', 'askDownload', 'webrtc', 'autofill', 'savePasswords', 'autoUpdate'].forEach(bool);
   if (patch.shields && typeof patch.shields === 'object') {
     out.shields = {};
     for (const k of ['enabled', 'ads', 'https', 'cookies', 'gpc']) {
@@ -311,6 +330,7 @@ function shortcutFor(input) {
   if (input.type !== 'keyDown') return null;
   const key = (input.key || '').toLowerCase();
   const mod = input.control || input.meta;
+  if (mod && settings && comboOfInput(input) === settings.lockShortcut) return 'lock';
   if (input.alt && !mod) {
     if (key === 'arrowleft') return 'back';
     if (key === 'arrowright') return 'forward';
@@ -326,7 +346,6 @@ function shortcutFor(input) {
       case 't': return 'reopen-tab';
       case 'b': return 'toggle-bookmarks-bar';
       case 'o': return 'bookmarks';
-      case 'l': return 'lock';
       case 's': return 'reading-list';
       case 'delete': return 'clear-data';
       default: return null;
@@ -451,7 +470,7 @@ handle('app:config', (ctx) => ({
   platform: process.platform,
   priv: ctx.priv,
   settings: publicSettings(),
-  lockEnabled: !!settings.lock,
+  lockEnabled: !GUEST,
   engines: ENGINES,
   guestPreload: pathToFileURL(path.join(__dirname, 'guest-preload.js')).href,
   downloadsDir: app.getPath('downloads'),
@@ -631,26 +650,18 @@ handle('logins:never-remove', (_ctx, origin) => {
   return settings.neverSave;
 });
 
-// passcode lock
-const hashPass = (pass, salt) => crypto.scryptSync(pass, salt, 32).toString('hex');
-function checkPass(pass) {
-  const l = settings.lock;
-  if (!l) return true;
-  const a = Buffer.from(hashPass(String(pass || ''), l.salt), 'hex');
-  const b = Buffer.from(l.hash, 'hex');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
+// lock: unlocking needs the passcode of the profile that is open (same passcode as the passcode screen)
 function lockNow() {
-  if (!settings.lock) return false;
+  if (GUEST) return false;
   locked = true;
   broadcast('lock', true);
   return true;
 }
 
-handle('lock:status', () => ({ enabled: !!settings.lock, locked }));
+handle('lock:status', () => ({ enabled: !GUEST, locked }));
 handle('lock:unlock', (_ctx, pass) => {
   if (Date.now() < blockedUntil) throw new Error('Too many attempts. Try again in a few seconds.');
-  if (checkPass(pass)) {
+  if (registry.verify(PROFILE_ID, String(pass || ''))) {
     locked = false;
     failures = 0;
     lastActivity = Date.now();
@@ -660,45 +671,11 @@ handle('lock:unlock', (_ctx, pass) => {
   if (++failures >= 5) { blockedUntil = Date.now() + 30000; failures = 0; }
   throw new Error('Wrong passcode');
 });
-handle('lock:set', (_ctx, pass, current) => {
-  if (settings.lock && !checkPass(current)) throw new Error('Current passcode is wrong');
-  if (typeof pass !== 'string' || pass.length < 4) throw new Error('Use at least 4 characters');
-  const salt = crypto.randomBytes(16).toString('hex');
-  settings.lock = { salt, hash: hashPass(pass, salt) };
-  saveSettings();
-  return true;
-});
-handle('lock:remove', (_ctx, current) => {
-  if (!checkPass(current)) throw new Error('Wrong passcode');
-  settings.lock = null;
-  locked = false;
-  saveSettings();
-  broadcast('lock', false);
-  return true;
-});
 handle('lock:now', () => lockNow());
-handle('lock:reset', async (ctx) => {
-  const { response } = await dialog.showMessageBox(ctx.win || undefined, {
-    type: 'warning',
-    buttons: ['Cancel', 'Erase data and remove passcode'],
-    defaultId: 0,
-    cancelId: 0,
-    message: 'Reset the passcode?',
-    detail: 'This erases saved passwords, history, bookmarks and the reading list.'
-  });
-  if (response !== 1) return false;
-  logins = []; history = []; bookmarks = []; reading = [];
-  for (const f of ['logins', 'history', 'bookmarks', 'reading']) writeJson(`${f}.json`, []);
-  settings.lock = null;
-  locked = false;
-  saveSettings();
-  broadcast('lock', false);
-  return true;
-});
 handle('app:activity', () => { lastActivity = Date.now(); return true; });
 setInterval(() => {
   const m = settings.autoLockMinutes;
-  if (settings.lock && !locked && m > 0 && Date.now() - lastActivity > m * 60000) lockNow();
+  if (!GUEST && !locked && started && m > 0 && Date.now() - lastActivity > m * 60000) lockNow();
 }, 15000).unref();
 
 // permissions list, clear browsing data, session, misc
@@ -958,6 +935,15 @@ function createWindow(priv = false) {
   return win;
 }
 
+// ---------- self update ----------
+const updater = createUpdater({
+  isAuto: () => !GUEST && settings.autoUpdate !== false,
+  notify: (u) => broadcast('update', u)
+});
+handle('update:status', () => updater.status());
+handle('update:check', () => updater.check());
+handle('update:install', () => updater.install());
+
 // ---------- passcode screen (main process) ----------
 let launcherWin = null;
 let attempts = 0;
@@ -1065,7 +1051,7 @@ function startBrowser() {
   downloads = readJson('downloads.json', []).map((d) =>
     d.state === 'progressing' || d.state === 'paused' ? Object.assign(d, { state: 'interrupted' }) : d);
   dlSeq = downloads.reduce((m, d) => Math.max(m, d.id || 0), 0);
-  locked = !!settings.lock;
+  locked = false;
   nativeTheme.themeSource = settings.theme;
 
   setupSession(session.fromPartition(PARTITION), false);
@@ -1077,6 +1063,7 @@ function startBrowser() {
     chromeVersion: process.versions.chrome
   });
   if (!GUEST) extensions.loadAll().catch(() => {});
+  if (!GUEST) updater.start();
 }
 
 const gotLock = app.requestSingleInstanceLock();
@@ -1091,6 +1078,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    if (process.platform === 'win32') app.setAppUserModelId('com.fuad.dexbrowse.desktop');
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'editMenu' }]));
     app.setAboutPanelOptions({
       applicationName: 'DexBrowse',

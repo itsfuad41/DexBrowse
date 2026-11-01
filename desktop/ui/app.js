@@ -255,9 +255,10 @@ function renderTabs() {
   const strip = $('tabs');
   strip.replaceChildren();
   for (const tab of tabs) {
-    const node = el('div', { className: 'tab' + (tab === active ? ' active' : '') + (tab.pinned ? ' pinned' : ''), title: tab.title });
+    const node = el('div', { className: 'tab' + (tab === active && !settingsOpen ? ' active' : '') + (tab.pinned ? ' pinned' : ''), title: tab.title });
     if (tab.loading) node.append(el('span', { className: 'spin' }));
     else if (tab.favicon) node.append(el('img', { src: tab.favicon, alt: '' }));
+    else if (isStart(tab.url)) node.append(el('img', { src: 'icon.png', alt: '' }));
     else node.append(el('span', { className: 'fav' }, (hostOf(tab.url).replace(/^www\./, '')[0] || 'D').toUpperCase()));
     if (!tab.pinned) node.append(el('span', { className: 't' }, tab.title));
     if (tab.audible || tab.muted) {
@@ -277,7 +278,16 @@ function renderTabs() {
     node.addEventListener('contextmenu', (e) => { e.preventDefault(); showTabMenu(tab, e.clientX, e.clientY); });
     strip.append(node);
   }
-  document.title = active ? `${active.title} – DexBrowse` : 'DexBrowse By Fuad';
+  if (settingsOpen) {
+    const node = el('div', { className: 'tab settings-tab active', title: 'Settings' },
+      el('img', { src: 'icon.png', alt: '' }), el('span', { className: 't' }, 'Settings'));
+    const close = el('button', { className: 'x', title: 'Close settings' });
+    close.innerHTML = svg('close');
+    close.addEventListener('click', (e) => { e.stopPropagation(); closeSettings(); });
+    node.append(close);
+    strip.append(node);
+  }
+  document.title = settingsOpen ? 'Settings – DexBrowse' : active ? `${active.title} – DexBrowse` : 'DexBrowse By Fuad';
 }
 
 function toggleMute(tab) {
@@ -511,9 +521,6 @@ async function paintDownloads(list) {
 async function refreshSync() {
   const res = await dex.syncStatus();
   if (res.ok) sync = res.data;
-  const btn = $('acctbtn');
-  btn.classList.toggle('on', sync.signedIn);
-  btn.title = sync.signedIn ? 'Google sync: ' + sync.email : 'Sign in with Google to sync history';
 }
 
 async function signIn(external) {
@@ -622,8 +629,8 @@ function showMenu() {
   item('Save page as PDF', '', () => savePdf());
   item('Developer tools', 'F12', () => perform('devtools'));
   menu.append(el('hr'));
-  if (lockEnabled) item('Lock DexBrowse', 'Ctrl+Shift+L', () => dex.lockNow());
-  item(sync.signedIn ? 'Google sync: ' + sync.email : 'Sign in with Google…', '', () => showAccount());
+  if (lockEnabled) item('Lock DexBrowse', cfg.settings.lockShortcut, () => dex.lockNow());
+  item(sync.signedIn ? 'Google sync: ' + sync.email : 'Google sync…', '', () => openSettings('sync'));
   item('Extensions', '', () => showExtensions());
   item('Profile: ' + cfg.profile.name, '', () => showProfiles());
   item('Settings', 'Ctrl+,', () => openSettings('appearance'));
@@ -703,8 +710,8 @@ async function showProfiles() {
   pop.replaceChildren(el('div', { className: 'pitem' }, avatar(cfg.profile), el('b', {}, cfg.profile.name), el('small', {}, cfg.guest ? 'Guest' : 'This window')));
   pop.append(el('hr'));
   if (!cfg.guest) {
-    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.profilesSwitch(); } }, 'Switch profile (enter passcode)'));
-    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); openSettings('profiles'); } }, 'Manage this profile / add a profile'));
+    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.lockNow(); } }, 'Lock', el('small', {}, cfg.settings.lockShortcut)));
+    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); openSettings('profiles'); } }, 'Manage this profile'));
     pop.append(el('hr'));
   }
   pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.windowNew(false); } }, 'New window'));
@@ -781,14 +788,18 @@ async function onGuestMessage(tab, e) {
 
 // ---------- settings page hooks ----------
 function closeSettings() {
+  if (!settingsOpen) return;
   settingsOpen = false;
   $('settings').hidden = true;
+  renderTabs();
+  updateToolbar();
 }
 function openSettings(section) {
   settingsOpen = true;
   closePops();
   closePanel();
   $('settings').hidden = false;
+  renderTabs();
   renderSettings(section);
 }
 
@@ -867,7 +878,7 @@ async function boot() {
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
 
   for (const [id, icon] of [['newtab', 'plus'], ['back', 'back'], ['forward', 'forward'], ['reload', 'reload'], ['siteicon', 'globe'],
-    ['star', 'star'], ['shieldbtn', 'shield'], ['acctbtn', 'user'], ['menubtn', 'menu'], ['findprev', 'up'], ['findnext', 'down'],
+    ['star', 'star'], ['shieldbtn', 'shield'], ['menubtn', 'menu'], ['findprev', 'up'], ['findnext', 'down'],
     ['extbtn', 'puzzle'], ['extclose', 'close'], ['findclose', 'close'], ['savelater', 'close'], ['panel-close', 'close'], ['lockicon', 'lock']]) setIcon(id, icon);
 
   $('newtab').addEventListener('click', () => createTab());
@@ -876,7 +887,6 @@ async function boot() {
   $('reload').addEventListener('click', () => perform('reload'));
   $('star').addEventListener('click', toggleBookmark);
   $('shieldbtn').addEventListener('click', showShields);
-  $('acctbtn').addEventListener('click', showAccount);
   $('extbtn').addEventListener('click', showExtensions);
   $('profbtn').addEventListener('click', showProfiles);
   $('extadd').addEventListener('click', async () => { if (extBarId && await installFromStore(extBarId)) $('extbar').hidden = true; });
@@ -912,12 +922,10 @@ async function boot() {
     $('savebar').hidden = true;
   });
   $('savelater').addEventListener('click', () => { pendingSave = null; $('savebar').hidden = true; });
+  $('locksub').textContent = 'Enter the passcode of ' + cfg.profile.name;
   $('lockgo').addEventListener('click', tryUnlock);
   $('lockinput').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
-  $('lockreset').addEventListener('click', async () => {
-    const r = await dex.lockReset();
-    if (r.ok && r.data) { lockEnabled = false; showLock(false); toast('Passcode removed and data erased'); }
-  });
+  $('lockreset').addEventListener('click', () => dex.profilesSwitch());
 
   document.addEventListener('mousedown', (e) => {
     if (e.target.closest('.pop') || e.target.closest('#menubtn') || e.target.closest('#shieldbtn') || e.target.closest('#extbtn') || e.target.closest('#profbtn')) return;
@@ -951,6 +959,18 @@ async function boot() {
     if (active) updateToolbar();
     if (settingsOpen) renderSettings(currentSection());
   });
+  dex.on('update', (u) => {
+    if (window.onUpdateState) window.onUpdateState(u);
+    if (u.state === 'ready') {
+      $('updatetext').textContent = `DexBrowse ${u.version} is ready.`;
+      $('updatebar').hidden = false;
+    } else if (u.state === 'downloading') {
+      toast(`Downloading update ${u.version}…`);
+    }
+  });
+  $('updatego').addEventListener('click', () => dex.updateInstall());
+  $('updateclose').addEventListener('click', () => { $('updatebar').hidden = true; });
+  setIcon('updateclose', 'close');
   dex.on('lock', async (state) => {
     if (state) { lockEnabled = true; showLock(true); }
     else { const s = await dex.lockStatus(); lockEnabled = !!(s.data && s.data.enabled); showLock(false); }

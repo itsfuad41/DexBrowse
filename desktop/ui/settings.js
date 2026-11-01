@@ -28,6 +28,19 @@ function sRow(title, desc, control) {
 function sCard(title, ...rows) {
   return el('div', { className: 'card' }, title ? el('h3', {}, title) : null, ...rows);
 }
+// password-type input with a Show/Hide toggle, so a passcode or recovery phrase can be checked while typing
+function secretInput(placeholder) {
+  const input = el('input', { type: 'password', placeholder, autocomplete: 'off' });
+  const toggle = el('button', { className: 'b', type: 'button', title: 'Show or hide' }, 'Show');
+  toggle.addEventListener('click', () => {
+    const hidden = input.type === 'password';
+    input.type = hidden ? 'text' : 'password';
+    toggle.textContent = hidden ? 'Hide' : 'Show';
+  });
+  const wrap = el('span', { style: 'display:inline-flex;gap:4px;align-items:center' }, input, toggle);
+  wrap.input = input;
+  return wrap;
+}
 function sBtn(label, fn, cls) {
   return el('button', { className: 'b ' + (cls || ''), onclick: fn }, label);
 }
@@ -38,11 +51,21 @@ function sSelect(options, value, onChange) {
   return s;
 }
 const setSetting = (patch) => dex.settingsSet(patch);
+function comboOf(e) {
+  const parts = [];
+  if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  let key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+  if (key === ' ') key = 'Space';
+  parts.push(key);
+  return parts.join('+');
+}
 
 async function renderSettings(section) {
   currentSectionId = SECTIONS.some(([id]) => id === section) ? section : 'appearance';
   const root = $('settings');
-  const nav = el('nav', {}, el('h1', {}, 'Settings'));
+  const nav = el('nav', {}, el('button', { className: 'back', onclick: closeSettings }, '← Back to browser'), el('h1', {}, 'Settings'));
   for (const [id, label] of SECTIONS) {
     nav.append(el('button', { className: id === currentSectionId ? 'on' : '', onclick: () => renderSettings(id) }, label));
   }
@@ -135,36 +158,36 @@ async function renderSettings(section) {
     }
 
     case 'security': {
-      const status = (await dex.lockStatus()).data || {};
-      const cur = el('input', { type: 'password', placeholder: 'Current passcode' });
-      const nw = el('input', { type: 'password', placeholder: status.enabled ? 'New passcode' : 'Passcode (4+ characters)' });
-      const nw2 = el('input', { type: 'password', placeholder: 'Repeat passcode' });
-      const msg = el('div', { className: 'msg' });
-      const save = sBtn(status.enabled ? 'Change passcode' : 'Set passcode', async () => {
-        if (nw.value !== nw2.value) { msg.textContent = 'The passcodes do not match.'; return; }
-        const r = await dex.lockSet(nw.value, cur.value);
-        if (!r.ok) { msg.textContent = r.error; return; }
-        lockEnabled = true; toast('Passcode saved'); renderSettings('security');
-      }, 'primary');
-      const pass = sCard('Passcode lock',
-        sRow('Lock DexBrowse with a passcode', status.enabled ? 'DexBrowse asks for the passcode on start and after auto-lock.' : 'Protects history, bookmarks, saved passwords and the open tabs.', el('span', {}, status.enabled ? 'On' : 'Off')));
-      if (status.enabled) pass.append(sRow('Current passcode', '', cur));
-      pass.append(sRow(status.enabled ? 'New passcode' : 'Passcode', '', nw), sRow('Confirm', '', nw2), el('div', { className: 'srow' }, save, msg));
-      main.append(pass);
-      if (status.enabled) {
-        main.append(sCard('Lock options',
-          sRow('Auto-lock after inactivity', '', sSelect([[0, 'Never'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']], s.autoLockMinutes, (v) => setSetting({ autoLockMinutes: Number(v) }))),
-          sRow('Lock now', 'Ctrl+Shift+L', sBtn('Lock', () => dex.lockNow())),
-          sRow('Remove passcode', 'Enter your current passcode above first.', sBtn('Remove', async () => {
-            const r = await dex.lockRemove(cur.value);
-            if (!r.ok) { toast(r.error); return; }
-            lockEnabled = false; toast('Passcode removed'); renderSettings('security');
-          }, 'danger')),
-          sRow('Forgot the passcode?', 'Resets the passcode but erases saved passwords, history and bookmarks.', sBtn('Reset…', async () => {
-            const r = await dex.lockReset();
-            if (r.ok && r.data) { lockEnabled = false; toast('Passcode removed and data erased'); renderSettings('security'); }
-          }, 'danger'))));
-      }
+      if (cfg.guest) { main.append(sCard('Guest browser', sRow('No lock in guest mode', 'The guest browser keeps nothing and is deleted when closed.', null))); break; }
+      const kbd = el('button', { className: 'b kbdbtn' }, s.lockShortcut);
+      kbd.addEventListener('click', () => {
+        kbd.textContent = 'Press the keys…';
+        kbd.classList.add('rec');
+        const onKey = async (e) => {
+          if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          document.removeEventListener('keydown', onKey, true);
+          kbd.classList.remove('rec');
+          if (e.key === 'Escape') { kbd.textContent = cfg.settings.lockShortcut; return; }
+          const combo = comboOf(e);
+          const r = await setSetting({ lockShortcut: combo });
+          if (!r.ok) toast(r.error);
+          else {
+            cfg.settings = r.data;
+            if (r.data.lockShortcut !== combo) toast('That shortcut cannot be used. Use Ctrl+Shift or Ctrl+Alt with a letter, digit or F-key.');
+          }
+          kbd.textContent = cfg.settings.lockShortcut;
+        };
+        document.addEventListener('keydown', onKey, true);
+      });
+      main.append(sCard('Lock',
+        sRow('Lock with your profile passcode', 'Locking hides the browser until you enter the passcode of this profile. Change the passcode in Profiles.', sBtn('Lock now', () => dex.lockNow(), 'primary')),
+        sRow('Auto-lock after inactivity', 'Locks automatically when you stop using DexBrowse.',
+          sSelect([[0, 'Never'], [1, '1 minute'], [2, '2 minutes'], [5, '5 minutes'], [10, '10 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']], s.autoLockMinutes, (v) => setSetting({ autoLockMinutes: Number(v) }))),
+        sRow('Lock shortcut', 'Click, then press the keys you want (Ctrl or Alt with Shift, a letter or an F-key).',
+          el('div', { style: 'display:flex;gap:6px' }, kbd, sBtn('Reset', async () => { await setSetting({ lockShortcut: 'Ctrl+Shift+L' }); renderSettings('security'); })))));
+      main.append(sCard('Passcode', sRow('Change passcode or recovery phrase', '', sBtn('Open Profiles', () => renderSettings('profiles')))));
       main.append(sCard('Private browsing',
         sRow('New private window', 'Ctrl+Shift+N. No history, cookies or saved logins are kept, and nothing is synced.', sBtn('Open', () => dex.windowNew(true)))));
       break;
@@ -210,7 +233,8 @@ async function renderSettings(section) {
       await refreshSync();
       const card = sCard('Google account');
       if (!sync.configured) card.append(el('div', { className: 'msg' }, 'Google sync is not set up in this build.'));
-      else if (!sync.signedIn) card.append(sRow('Not signed in', 'Sign in to share history between your phone and this PC.', sBtn('Sign in with Google', async () => { await signIn(); renderSettings('sync'); }, 'primary')));
+      else if (!sync.signedIn) card.append(sRow('Not signed in', 'Sign in to share history between your phone and this PC. Sign-in opens in a DexBrowse window.', sBtn('Sign in with Google', async () => { await signIn(false); renderSettings('sync'); }, 'primary')),
+        sRow('Sign-in window blocked by Google?', 'Use your system browser instead.', sBtn('Use system browser', async () => { await signIn(true); renderSettings('sync'); })));
       else {
         card.append(sRow('Signed in', sync.email, sBtn('Sign out', async () => { await dex.syncSignOut(); await refreshSync(); renderSettings('sync'); }, 'danger')),
           sRow('Synced history', 'See history from all your devices.', sBtn('Open', () => showLibrary('cloud'))),
@@ -252,21 +276,20 @@ async function renderSettings(section) {
         sRow('Color', '', sw),
         sRow('Switch profile', 'Opens the passcode screen. The passcode you type decides which profile opens.', sBtn('Switch…', () => dex.profilesSwitch(), 'primary'))));
 
-      const oldP = el('input', { type: 'password', placeholder: 'Current passcode' });
-      const newP = el('input', { type: 'password', placeholder: 'New passcode' });
-      const rec = el('input', { type: 'password', placeholder: 'New recovery phrase' });
+      const oldW = secretInput('Current passcode'), newW = secretInput('New passcode'), recW = secretInput('New recovery phrase');
+      const oldP = oldW.input, newP = newW.input, rec = recW.input;
       main.append(sCard('Passcode',
-        sRow('Change passcode', 'Any length. It must differ from the passcodes of your other profiles.', el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, oldP, newP,
+        sRow('Change passcode', 'Any length. It must differ from the passcodes of your other profiles.', el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, oldW, newW,
           sBtn('Change', async () => { const r = await dex.profilesChangePasscode(oldP.value, newP.value); toast(r.ok ? 'Passcode changed' : r.error); if (r.ok) { oldP.value = ''; newP.value = ''; } }))),
         sRow('Recovery phrase', me.hasRecovery ? 'A recovery phrase is set. Enter a new one to replace it.' : 'Lets you reset a forgotten passcode from the passcode screen.',
-          el('div', { style: 'display:flex;gap:6px' }, rec, sBtn('Save', async () => { const r = await dex.profilesUpdate({ recovery: rec.value }); toast(r.ok ? 'Recovery phrase saved' : r.error); if (r.ok) { rec.value = ''; cfg.profile.hasRecovery = true; } })))));
+          el('div', { style: 'display:flex;gap:6px' }, recW, sBtn('Save', async () => { const r = await dex.profilesUpdate({ recovery: rec.value }); toast(r.ok ? 'Recovery phrase saved' : r.error); if (r.ok) { rec.value = ''; cfg.profile.hasRecovery = true; } })))));
 
       const aName = el('input', { placeholder: 'Profile name', maxLength: 40 });
-      const aPass = el('input', { type: 'password', placeholder: 'Passcode' });
-      const aRec = el('input', { type: 'password', placeholder: 'Recovery phrase (optional)' });
+      const aPassW = secretInput('Passcode'), aRecW = secretInput('Recovery phrase (optional)');
+      const aPass = aPassW.input, aRec = aRecW.input;
       main.append(sCard('Add a profile',
         sRow('New profile', 'It will not appear in any list. Open it later by typing its passcode on the passcode screen.',
-          el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, aName, aPass, aRec,
+          el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, aName, aPassW, aRecW,
             sBtn('Create', async () => { const r = await dex.profilesAdd({ name: aName.value, passcode: aPass.value, recovery: aRec.value }); toast(r.ok ? 'Profile created. Use Switch profile and enter its passcode.' : r.error); if (r.ok) { aName.value = ''; aPass.value = ''; aRec.value = ''; } }, 'primary')))));
 
       const delP = el('input', { type: 'password', placeholder: 'Passcode to confirm' });
@@ -325,6 +348,21 @@ async function renderSettings(section) {
     }
 
     case 'about': {
+      const upText = el('span', {}, 'Version ' + cfg.version);
+      const showUp = (u) => {
+        upText.textContent = ({ checking: 'Checking…', none: 'You have the latest version.', dev: u.message, error: 'Update check failed: ' + (u.message || ''),
+          downloading: `Downloading ${u.version}… ${u.percent || 0}%`, ready: `Version ${u.version} is ready to install.`, idle: 'Version ' + cfg.version })[u.state] || '';
+      };
+      window.onUpdateState = showUp;
+      const upBtn = el('span', { style: 'display:flex;gap:6px' },
+        sBtn('Check for updates', async () => { showUp({ state: 'checking' }); const r = await dex.updateCheck(); if (r.ok) showUp(r.data); }, 'primary'),
+        sBtn('Restart to update', () => dex.updateInstall()));
+      main.append(sCard('Updates',
+        sRow('Update automatically', 'DexBrowse checks GitHub for new versions, downloads them in the background and installs on restart.', switchEl(s.autoUpdate !== false, (v) => setSetting({ autoUpdate: v }))),
+        sRow('DexBrowse updates', '', upBtn)));
+      dex.updateStatus().then((r) => { if (r.ok) showUp(r.data); });
+      main.querySelector('.srow:last-child .l').append(upText);
+
       main.append(el('div', { className: 'card brandrow' }, el('img', { src: 'icon.png', alt: '' }),
         el('div', {}, el('h3', { style: 'margin:0' }, 'DexBrowse By Fuad'), el('span', { style: 'color:var(--muted)' }, 'A private, Chromium-based browser'))));
       main.append(sCard('Information',

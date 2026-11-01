@@ -84,7 +84,9 @@ Windows installer: `DexBrowse-PC-Setup.exe`. Run locally: `cd desktop && npm ins
   Opera and Firefox profiles; passwords come from the CSV export of the other browser, bookmarks also from `.html`.
 - **Saved logins for many accounts**: several usernames per site; a "DexBrowse saved logins" list appears when you
   focus the login field and only the account you pick is filled.
-- **Google sign-in** happens in a DexBrowse window (a system-browser option is kept as fallback).
+- **Auto-update**: the installed app checks GitHub releases, downloads new versions in the background and installs them on restart (Settings > About).
+- **Lock**: the profile button and Ctrl+Shift+L (changeable in Settings > Security) lock the browser until the profile passcode is entered; optional auto-lock timer.
+- **Google sign-in** (Settings > Google sync) happens in a DexBrowse window (a system-browser option is kept as fallback).
 - **Extensions**: install from the Chrome Web Store ("Add to DexBrowse" bar on store pages, or paste a link/ID),
   from a `.crx`/`.zip`, or load an unpacked folder. Electron implements a subset of Chrome's extension APIs, so
   content-script extensions work best and toolbar popups are not shown.

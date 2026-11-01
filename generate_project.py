@@ -74,8 +74,8 @@ android {
         applicationId = "com.fuad.dexbrowse"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "2.16.0"
+        versionCode = 28
+        versionName = "2.17.0"
 
         buildConfigField(
             "String",

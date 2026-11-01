@@ -66,7 +66,6 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   position: absolute; top: 1px; right: -2px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
   background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
 }
-#acctbtn.on { color: var(--ok); }
 #profbtn { width: 28px; height: 28px; border-radius: 50%; border: 0; color: #fff; font-weight: 700; font-size: 13px; padding: 0; margin: 0 2px; flex: none; }
 #extbtn.has { color: var(--accent); }
 #extbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--field); border-top: 1px solid var(--line); }
@@ -207,3 +206,12 @@ body.locked #views, body.locked #bmbar { visibility: hidden; }
   background: var(--chrome); color: var(--text); border: 1px solid var(--line); padding: 10px 16px; border-radius: 12px; max-width: 80vw;
 }
 .brandrow h3 { padding: 0 !important; }
+
+.tab.settings-tab img { width: 16px; height: 16px; }
+#settings nav .back { margin: 0 0 12px; border: 1px solid var(--line); text-align: center; }
+#updatebar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 40; display: flex; align-items: center; gap: 10px; padding: 9px 12px 9px 16px; background: var(--panel); border: 1px solid var(--accent); border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+#updatebar[hidden] { display: none; }
+#updatebar button.primary { background: var(--accent); color: #fff; border-radius: 8px; padding: 6px 12px; }
+.lockbox p { margin: 0; color: var(--muted); }
+.kbdbtn { min-width: 150px; font-family: ui-monospace, Consolas, monospace; }
+.kbdbtn.rec { border-color: var(--accent); color: var(--accent); }

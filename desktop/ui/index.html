@@ -5,6 +5,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; frame-src 'self' file: http: https:">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DexBrowse By Fuad</title>
+  <link rel="icon" href="icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -25,7 +26,6 @@
     </div>
     <button id="shieldbtn" class="icon" title="Shields"><span id="shieldcount" class="badge" hidden></span></button>
     <button id="extbtn" class="icon" title="Extensions"></button>
-    <button id="acctbtn" class="icon" title="Google sync"></button>
     <button id="profbtn" title="Profiles"></button>
     <button id="menubtn" class="icon" title="Menu"></button>
   </div>
@@ -54,8 +54,9 @@
   </div>
 
   <div id="progress"></div>
-  <div id="views"></div>
-  <div id="settings" hidden></div>
+  <div id="views">
+    <div id="settings" hidden></div>
+  </div>
 
   <aside id="panel" hidden>
     <header>
@@ -75,11 +76,18 @@
     <div class="lockbox">
       <img id="lockicon" src="icon.png" alt="DexBrowse" width="64" height="64">
       <h1>DexBrowse is locked</h1>
+      <p id="locksub">Enter your profile passcode</p>
       <input id="lockinput" type="password" placeholder="Passcode" autocomplete="off">
       <div id="lockerr"></div>
       <button id="lockgo" class="primary">Unlock</button>
-      <button id="lockreset" class="link">Forgot passcode?</button>
+      <button id="lockreset" class="link">Switch profile</button>
     </div>
+  </div>
+
+  <div id="updatebar" hidden>
+    <span id="updatetext"></span>
+    <button id="updatego" class="primary">Restart to update</button>
+    <button id="updateclose" class="icon" title="Later"></button>
   </div>
 
   <div id="toast" hidden></div>

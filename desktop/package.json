@@ -1,7 +1,7 @@
 {
   "name": "dexbrowse-desktop",
   "productName": "DexBrowse",
-  "version": "2.16.0",
+  "version": "2.17.0",
   "description": "DexBrowse By Fuad - Chromium desktop browser",
   "main": "main.js",
   "author": "Md. Fuad Hasan",
@@ -33,7 +33,8 @@
       "build/**",
       "profiles.js",
       "importer.js",
-      "launcher-preload.js"
+      "launcher-preload.js",
+      "updater.js"
     ],
     "directories": {
       "output": "dist"
@@ -52,11 +53,25 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "shortcutName": "DexBrowse",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     },
-    "copyright": "Copyright \u00a9 Md. Fuad Hasan (DexBrowse By Fuad)"
+    "copyright": "Copyright \u00a9 Md. Fuad Hasan (DexBrowse By Fuad)",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "itsfuad41",
+        "repo": "DexBrowse"
+      }
+    ]
   },
   "dependencies": {
-    "sql.js": "^1.11.0"
+    "sql.js": "^1.11.0",
+    "electron-updater": "6.3.9"
   }
 }

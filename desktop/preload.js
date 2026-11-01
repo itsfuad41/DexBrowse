@@ -67,6 +67,10 @@ contextBridge.exposeInMainWorld('dex', {
   extensionsInstallUnpacked: call('extensions:install-unpacked'),
   extensionsRemove: call('extensions:remove'),
 
+  updateStatus: call('update:status'),
+  updateCheck: call('update:check'),
+  updateInstall: call('update:install'),
+
   importDetect: call('import:detect'),
   importRun: call('import:run'),
   importFile: call('import:file'),

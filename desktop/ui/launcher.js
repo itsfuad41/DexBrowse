@@ -47,6 +47,13 @@ $('recover').addEventListener('click', recover);
 for (const id of ['c-name', 'c-pass', 'c-rec']) $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
 for (const id of ['r-phrase', 'r-pass']) $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') recover(); });
 
+function bindShow(box, ids) {
+  $(box).addEventListener('change', () => { for (const id of ids) $(id).type = $(box).checked ? 'text' : 'password'; });
+}
+bindShow('c-show', ['c-pass', 'c-rec']);
+bindShow('r-show', ['r-phrase', 'r-pass']);
+$('pass').addEventListener('dblclick', () => { $('pass').type = $('pass').type === 'password' ? 'text' : 'password'; });
+
 (async () => {
   const r = await launcher.state();
   hasProfiles = !!(r.ok && r.data.hasProfiles);

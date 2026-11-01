@@ -45,12 +45,16 @@ jobs:
         run: |
           ls -la desktop/dist
           test -f desktop/dist/DexBrowse-PC-Setup.exe
+          test -f desktop/dist/latest.yml
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: DexBrowse-PC-Windows
-          path: desktop/dist/DexBrowse-PC-Setup.exe
+          path: |
+            desktop/dist/DexBrowse-PC-Setup.exe
+            desktop/dist/DexBrowse-PC-Setup.exe.blockmap
+            desktop/dist/latest.yml
           if-no-files-found: error
 
       - name: Read version
@@ -66,5 +70,8 @@ jobs:
           tag_name: v${{ steps.ver.outputs.name }}
           target_commitish: ${{ github.sha }}
           name: DexBrowse ${{ steps.ver.outputs.name }}
-          files: desktop/dist/DexBrowse-PC-Setup.exe
+          files: |
+            desktop/dist/DexBrowse-PC-Setup.exe
+            desktop/dist/DexBrowse-PC-Setup.exe.blockmap
+            desktop/dist/latest.yml
           generate_release_notes: true
