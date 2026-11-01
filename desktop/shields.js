@@ -8,6 +8,14 @@ const TWO_LEVEL = new Set([
   'com.cn', 'com.hk', 'com.sg', 'com.my', 'com.pk', 'co.za', 'com.ng', 'com.eg', 'com.sa'
 ]);
 
+// Challenge and login providers must keep working ("verify you are human",
+// sign-in with Google/Microsoft/Apple), so they are never blocked or cookie-stripped.
+const CAPTCHA_HOSTS = new Set([
+  'hcaptcha.com', 'recaptcha.net', 'challenges.cloudflare.com', 'cloudflare.com', 'arkoselabs.com',
+  'funcaptcha.com', 'datadome.co', 'captcha-delivery.com', 'perimeterx.net', 'px-cdn.net', 'geetest.com', 'gstatic.com'
+]);
+const COOKIE_OK = new Set([...CAPTCHA_HOSTS, 'google.com', 'googleapis.com', 'microsoftonline.com', 'live.com', 'microsoft.com', 'apple.com']);
+
 function regDomain(host) {
   const parts = (host || '').split('.');
   if (parts.length <= 2 || /^\d+(\.\d+){3}$/.test(host)) return host;
@@ -85,6 +93,10 @@ function createShields(api) {
         return callback({ cancel: true });
       }
 
+      if (inList(CAPTCHA_HOSTS, host) || (regDomain(host) === 'google.com' && reqUrl.pathname.startsWith('/recaptcha'))) {
+        return callback({});
+      }
+
       if (rule.ads && topHost && regDomain(host) !== regDomain(topHost)) {
         const isAd = inList(ads, host);
         if (isAd || inList(trackers, host)) {
@@ -110,11 +122,13 @@ function createShields(api) {
       const reqUrl = safeUrl(details.url);
       const headers = details.requestHeaders;
       if (reqUrl) {
+        if (api.decorateHeaders) api.decorateHeaders(headers, reqUrl);
         const topHost = topHostOf(details, reqUrl);
         const rule = effective(topHost);
         if (rule.up) {
           if (rule.gpc) { headers['Sec-GPC'] = '1'; headers['DNT'] = '1'; }
           if (rule.cookies && details.resourceType !== 'mainFrame' && topHost &&
+              !inList(COOKIE_OK, reqUrl.hostname) && !inList(COOKIE_OK, topHost) &&
               regDomain(reqUrl.hostname) !== regDomain(topHost)) {
             for (const k of Object.keys(headers)) if (k.toLowerCase() === 'cookie') delete headers[k];
           }
@@ -129,7 +143,8 @@ function createShields(api) {
       if (reqUrl && details.resourceType !== 'mainFrame') {
         const topHost = topHostOf(details, reqUrl);
         const rule = effective(topHost);
-        if (rule.up && rule.cookies && topHost && regDomain(reqUrl.hostname) !== regDomain(topHost)) {
+        if (rule.up && rule.cookies && topHost && !inList(COOKIE_OK, reqUrl.hostname) && !inList(COOKIE_OK, topHost) &&
+            regDomain(reqUrl.hostname) !== regDomain(topHost)) {
           for (const k of Object.keys(headers)) if (k.toLowerCase() === 'set-cookie') delete headers[k];
         }
       }

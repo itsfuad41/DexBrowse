@@ -5,9 +5,39 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
+const { spawn } = require('child_process');
 const sync = require('./sync');
 const makeUserAgents = require('./uas');
 const { createShields } = require('./shields');
+const { createExtensions } = require('./extensions');
+
+// Look like a normal browser to bot checks (navigator.webdriver stays false).
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+
+// ---------- profiles: each profile is its own data folder and its own browser process ----------
+const ROOT_DIR = app.getPath('userData');
+const PROFILE_COLORS = ['#FB542B', '#A855F7', '#3B82F6', '#10B981', '#F59E0B', '#EC4899', '#14B8A6', '#64748B'];
+const profilesFile = path.join(ROOT_DIR, 'profiles.json');
+
+function readProfiles() {
+  let list = [];
+  try { list = JSON.parse(fs.readFileSync(profilesFile, 'utf8')).profiles || []; } catch (_) { list = []; }
+  if (!list.some((p) => p.id === 'default')) list.unshift({ id: 'default', name: 'Default', color: PROFILE_COLORS[0] });
+  return list;
+}
+function writeProfiles(list) {
+  try {
+    fs.mkdirSync(ROOT_DIR, { recursive: true });
+    fs.writeFileSync(profilesFile, JSON.stringify({ profiles: list }));
+  } catch (_) { /* ignore */ }
+}
+const profileArg = (process.argv.find((a) => a.startsWith('--profile=')) || '').slice('--profile='.length);
+const PROFILE_ID = /^[a-z0-9-]{1,40}$/.test(profileArg) ? profileArg : 'default';
+if (PROFILE_ID !== 'default') app.setPath('userData', path.join(ROOT_DIR, 'Profiles', PROFILE_ID));
+const currentProfile = () => readProfiles().find((p) => p.id === PROFILE_ID) || readProfiles()[0];
+
+const APP_ICON = path.join(__dirname, 'build', 'icon.png');
+const DEVELOPER = 'Md. Fuad Hasan';
 
 // Present as plain Chromium: drop the "Electron/x" and app-name tokens.
 const cleanUA = app.userAgentFallback.replace(/\s(?:Electron|dexbrowse-desktop|DexBrowse)\/\S+/gi, '');
@@ -127,11 +157,42 @@ function broadcast(channel, data, privFilter) {
 // ---------- user agent ----------
 const currentUA = () => userAgents[settings.ua] || cleanUA;
 const sessions = () => [session.fromPartition(PARTITION), session.fromPartition(PRIVATE_PARTITION)];
+const hostPlatform = () => (process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux');
+const uaMeta = () => makeUserAgents.metadataFor(currentUA(), process.versions.chrome, hostPlatform());
+const acceptLanguages = () => [...new Set([String(app.getLocale() || 'en-US').replace('_', '-'), 'en-US', 'en'])].join(',');
+
+// Chromium sends no client hints once the UA is overridden, and real Chrome never omits them.
+// Re-announce them (brand "Google Chrome", platform, languages) so sites do not see a bot.
+function applyUAOverride(contents) {
+  const meta = uaMeta();
+  try {
+    if (!contents.debugger.isAttached()) contents.debugger.attach('1.3');
+  } catch (_) {
+    return;
+  }
+  const params = { userAgent: currentUA(), acceptLanguage: acceptLanguages() };
+  if (meta) {
+    params.platform = meta.navPlatform;
+    params.userAgentMetadata = meta.metadata;
+  }
+  contents.debugger.sendCommand('Emulation.setUserAgentOverride', params).catch(() => {});
+}
+
+function decorateHeaders(headers, reqUrl) {
+  const meta = uaMeta();
+  if (!meta) return;
+  const secure = reqUrl.protocol === 'https:' || reqUrl.hostname === 'localhost' || reqUrl.hostname === '127.0.0.1';
+  if (!secure) return;
+  for (const [k, v] of Object.entries(meta.headers)) if (!headers[k]) headers[k] = v;
+}
 
 function applyUserAgent() {
-  for (const ses of sessions()) ses.setUserAgent(currentUA());
+  for (const ses of sessions()) ses.setUserAgent(currentUA(), acceptLanguages());
   for (const contents of webContents.getAllWebContents()) {
-    if (contents.getType() === 'webview') contents.setUserAgent(currentUA());
+    if (contents.getType() === 'webview') {
+      contents.setUserAgent(currentUA(), acceptLanguages());
+      applyUAOverride(contents);
+    }
   }
 }
 
@@ -139,6 +200,7 @@ function applyUserAgent() {
 const counts = new Map();
 const lastSent = new Map();
 const shields = createShields({
+  decorateHeaders: (headers, url) => decorateHeaders(headers, url),
   getSettings: () => settings,
   getSiteRules: () => siteRules,
   onBlocked({ id, kind }) {
@@ -349,7 +411,8 @@ function pageContextMenu(contents, p) {
 
 app.on('web-contents-created', (_event, contents) => {
   if (contents.getType() !== 'webview') return;
-  contents.setUserAgent(currentUA());
+  contents.setUserAgent(currentUA(), acceptLanguages());
+  applyUAOverride(contents);
   contents.setWebRTCIPHandlingPolicy(settings.webrtc ? 'default_public_interface_only' : 'default');
   contents.setWindowOpenHandler(({ url }) => {
     const host = hostOf(contents);
@@ -394,6 +457,8 @@ handle('app:config', (ctx) => ({
   guestPreload: pathToFileURL(path.join(__dirname, 'guest-preload.js')).href,
   downloadsDir: app.getPath('downloads'),
   secureStorage: safeStorage.isEncryptionAvailable(),
+  profile: currentProfile(),
+  developer: DEVELOPER,
   stats
 }));
 
@@ -661,6 +726,80 @@ handle('session:load', (ctx) => {
   if (ctx.priv || settings.startup !== 'restore') return [];
   return readJson('session.json', []);
 });
+// extensions
+let extensions = null;
+const extList = () => (extensions ? extensions.list() : []);
+handle('extensions:list', (ctx) => (ctx.priv ? [] : extList()));
+handle('extensions:install-store', (ctx, input) => {
+  if (ctx.priv) throw new Error('Extensions are not available in private windows');
+  return extensions.installFromStore(input);
+});
+handle('extensions:install-file', async (ctx) => {
+  if (ctx.priv) throw new Error('Extensions are not available in private windows');
+  const { canceled, filePaths } = await dialog.showOpenDialog(ctx.win || undefined, {
+    title: 'Install extension',
+    filters: [{ name: 'Extension package', extensions: ['crx', 'zip'] }],
+    properties: ['openFile']
+  });
+  if (canceled || !filePaths[0]) return null;
+  return extensions.installFile(filePaths[0]);
+});
+handle('extensions:install-unpacked', async (ctx) => {
+  if (ctx.priv) throw new Error('Extensions are not available in private windows');
+  const { canceled, filePaths } = await dialog.showOpenDialog(ctx.win || undefined, {
+    title: 'Load unpacked extension (folder with manifest.json)',
+    properties: ['openDirectory']
+  });
+  if (canceled || !filePaths[0]) return null;
+  return extensions.installUnpacked(filePaths[0]);
+});
+handle('extensions:remove', (_ctx, id) => extensions.remove(id));
+
+// profiles
+function spawnProfile(id) {
+  const keep = process.argv.slice(1).filter((a) => /^--(no-sandbox|password-store|host-resolver-rules|disable-gpu)/.test(a));
+  const args = [...(process.defaultApp ? [app.getAppPath()] : []), ...keep, `--profile=${id}`];
+  spawn(process.execPath, args, { detached: true, stdio: 'ignore' }).unref();
+}
+handle('profiles:list', () => ({ current: PROFILE_ID, profiles: readProfiles() }));
+handle('profiles:add', (_ctx, { name, color }) => {
+  const clean = String(name || '').trim().slice(0, 30);
+  if (!clean) throw new Error('Enter a name for the profile');
+  const list = readProfiles();
+  if (list.some((p) => p.name.toLowerCase() === clean.toLowerCase())) throw new Error('A profile with that name already exists');
+  const profile = {
+    id: 'p-' + crypto.randomBytes(4).toString('hex'),
+    name: clean,
+    color: PROFILE_COLORS.includes(color) ? color : PROFILE_COLORS[list.length % PROFILE_COLORS.length]
+  };
+  list.push(profile);
+  writeProfiles(list);
+  return profile;
+});
+handle('profiles:update', (_ctx, id, patch) => {
+  const list = readProfiles();
+  const profile = list.find((p) => p.id === id);
+  if (!profile) throw new Error('Profile not found');
+  if (typeof patch.name === 'string' && patch.name.trim()) profile.name = patch.name.trim().slice(0, 30);
+  if (PROFILE_COLORS.includes(patch.color)) profile.color = patch.color;
+  writeProfiles(list);
+  return profile;
+});
+handle('profiles:delete', (_ctx, id) => {
+  if (id === 'default') throw new Error('The default profile cannot be deleted');
+  if (id === PROFILE_ID) throw new Error('Switch to another profile before deleting this one');
+  if (!/^[a-z0-9-]{1,40}$/.test(id)) throw new Error('Invalid profile');
+  fs.rmSync(path.join(ROOT_DIR, 'Profiles', id), { recursive: true, force: true });
+  writeProfiles(readProfiles().filter((p) => p.id !== id));
+  return true;
+});
+handle('profiles:open', (_ctx, id) => {
+  if (!readProfiles().some((p) => p.id === id)) throw new Error('Profile not found');
+  if (id === PROFILE_ID) createWindow(false);
+  else spawnProfile(id);
+  return true;
+});
+
 handle('window:new', (_ctx, priv) => { createWindow(!!priv); return true; });
 handle('app:quit', () => { app.quit(); return true; });
 handle('page:savepdf', async (ctx, base64, name) => {
@@ -693,7 +832,8 @@ function createWindow(priv = false) {
     minWidth: 720,
     minHeight: 480,
     backgroundColor: priv ? '#1A0F2E' : '#0B1220',
-    title: priv ? 'DexBrowse (Private)' : 'DexBrowse By Fuad',
+    icon: APP_ICON,
+    title: (priv ? 'DexBrowse (Private)' : 'DexBrowse By Fuad') + (PROFILE_ID !== 'default' ? ' \u2013 ' + currentProfile().name : ''),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -729,12 +869,10 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // Launching DexBrowse again opens another browser window instead of doing nothing.
   app.on('second-instance', () => {
-    const first = [...wins.values()].find((w) => !w.priv) || [...wins.values()][0];
-    if (first) {
-      if (first.win.isMinimized()) first.win.restore();
-      first.win.focus();
-    }
+    const win = createWindow(false);
+    win.once('ready-to-show', () => win.focus());
   });
 
   app.whenReady().then(() => {
@@ -762,9 +900,20 @@ if (!gotLock) {
     nativeTheme.themeSource = settings.theme;
 
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'editMenu' }]));
+    app.setAboutPanelOptions({
+      applicationName: 'DexBrowse',
+      applicationVersion: app.getVersion(),
+      copyright: `Developed by ${DEVELOPER} (DexBrowse By Fuad)`
+    });
     setupSession(session.fromPartition(PARTITION), false);
     setupSession(session.fromPartition(PRIVATE_PARTITION), true);
     applyUserAgent();
+    extensions = createExtensions({
+      getSession: () => session.fromPartition(PARTITION),
+      dir: path.join(app.getPath('userData'), 'Extensions'),
+      chromeVersion: process.versions.chrome
+    });
+    extensions.loadAll().catch(() => {});
     createWindow(false);
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow(false);

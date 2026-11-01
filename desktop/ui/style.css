@@ -67,6 +67,29 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
 }
 #acctbtn.on { color: var(--ok); }
+#profbtn { width: 28px; height: 28px; border-radius: 50%; border: 0; color: #fff; font-weight: 700; font-size: 13px; padding: 0; margin: 0 2px; flex: none; }
+#extbtn.has { color: var(--accent); }
+#extbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--field); border-top: 1px solid var(--line); }
+#extbar[hidden] { display: none; }
+#exttext { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#extbar button:not(.icon) { border: 1px solid var(--accent); padding: 5px 12px; border-radius: 8px; }
+#ext-pop { top: 78px; right: 90px; width: 340px; padding: 12px; }
+#prof-pop { top: 78px; right: 8px; width: 280px; }
+.pitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 10px; border-radius: 8px; }
+.pitem .av, .av { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.pitem small { margin-left: auto; color: var(--muted); }
+.extrow { display: flex; align-items: center; gap: 10px; padding: 7px 4px; }
+.extrow img { width: 28px; height: 28px; border-radius: 6px; background: var(--field); }
+.extrow .t { flex: 1; min-width: 0; }
+.extrow .t b, .extrow .t span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extrow .t span { color: var(--muted); font-size: 11.5px; }
+.extnote { color: var(--muted); font-size: 11.5px; margin: 8px 2px 0; line-height: 1.4; }
+.brandrow { display: flex; align-items: center; gap: 14px; }
+.brandrow img { width: 56px; height: 56px; border-radius: 14px; }
+.swatches { display: flex; gap: 6px; flex-wrap: wrap; }
+.swatches button { width: 22px; height: 22px; border-radius: 50%; padding: 0; border: 2px solid transparent; }
+.swatches button.on { border-color: var(--text); }
+#lockicon { border-radius: 16px; margin: 0 auto; }
 #progress { height: 2px; width: 0; background: var(--accent); transition: width .25s; }
 #progress.on { width: 70%; }
 
@@ -174,8 +197,6 @@ body.locked #views, body.locked #bmbar { visibility: hidden; }
 #lock { position: fixed; inset: 0; z-index: 100; background: var(--bg); display: grid; place-items: center; }
 .lockbox { width: 320px; text-align: center; display: flex; flex-direction: column; gap: 12px; }
 .lockbox h1 { font-size: 20px; margin: 0; }
-#lockicon { color: var(--accent); }
-#lockicon svg { width: 54px; height: 54px; }
 .lockbox input { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--field); color: var(--text); font-size: 16px; text-align: center; outline: none; }
 .lockbox input:focus { border-color: var(--accent); }
 #lockerr { color: var(--danger); min-height: 18px; }
@@ -185,3 +206,4 @@ body.locked #views, body.locked #bmbar { visibility: hidden; }
   position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 120;
   background: var(--chrome); color: var(--text); border: 1px solid var(--line); padding: 10px 16px; border-radius: 12px; max-width: 80vw;
 }
+.brandrow h3 { padding: 0 !important; }

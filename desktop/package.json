@@ -1,10 +1,10 @@
 {
   "name": "dexbrowse-desktop",
   "productName": "DexBrowse",
-  "version": "2.14.0",
+  "version": "2.15.0",
   "description": "DexBrowse By Fuad - Chromium desktop browser",
   "main": "main.js",
-  "author": "Fuad",
+  "author": "Md. Fuad Hasan",
   "license": "MIT",
   "scripts": {
     "start": "node scripts/write-config.js && electron .",
@@ -28,7 +28,9 @@
       "uas.js",
       "app-config.json",
       "ui/**/*",
-      "package.json"
+      "package.json",
+      "extensions.js",
+      "build/**"
     ],
     "directories": {
       "output": "dist"
@@ -42,11 +44,13 @@
           ]
         }
       ],
-      "artifactName": "DexBrowse-PC-Setup.${ext}"
+      "artifactName": "DexBrowse-PC-Setup.${ext}",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "copyright": "Copyright \u00a9 Md. Fuad Hasan (DexBrowse By Fuad)"
   }
 }

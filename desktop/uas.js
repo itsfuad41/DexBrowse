@@ -1,5 +1,5 @@
 // User agents, matching the phone app. "" means this browser's own Chrome UA.
-module.exports = function userAgents(v) {
+function userAgents(v) {
   const chrome = `Chrome/${v}.0.0.0 Safari/537.36`;
   const webkit = 'AppleWebKit/537.36 (KHTML, like Gecko)';
   return {
@@ -25,4 +25,49 @@ module.exports = function userAgents(v) {
     'Android · Samsung Internet': `Mozilla/5.0 (Linux; Android 14; SAMSUNG SM-S918B) ${webkit} SamsungBrowser/26.0 Chrome/${v}.0.0.0 Mobile Safari/537.36`,
     'This browser (default)': ''
   };
-};
+}
+
+// Client hints (Sec-CH-UA*, navigator.userAgentData) that match a Chrome-style UA string.
+// Real Chrome always sends the "Google Chrome" brand; sites treat its absence as a bot signal.
+function metadataFor(ua, fullVersion, platformFallback) {
+  if (!/Chrome\//.test(ua) || /CriOS|Firefox|SamsungBrowser/.test(ua)) return null;
+  const major = (/Chrome\/(\d+)/.exec(ua) || [])[1] || '130';
+  const full = ua.includes(`Chrome/${major}.0.0.0`) ? `${major}.0.0.0` : fullVersion;
+  const grease = { brand: 'Not?A_Brand', version: '99' };
+  const brand = /Edg\//.test(ua) ? 'Microsoft Edge' : /OPR\//.test(ua) ? 'Opera' : /Vivaldi|Ubuntu Chromium/.test(ua) ? null : 'Google Chrome';
+  const list = (ver) => [{ brand: 'Chromium', version: ver }, ...(brand ? [{ brand, version: ver }] : []), grease];
+  let platform = platformFallback;
+  let platformVersion = '';
+  let navPlatform = 'Linux x86_64';
+  let mobile = false;
+  let model = '';
+  if (/Windows NT 10/.test(ua)) { platform = 'Windows'; platformVersion = '15.0.0'; navPlatform = 'Win32'; }
+  else if (/Windows NT 6/.test(ua)) { platform = 'Windows'; platformVersion = '0.1.0'; navPlatform = 'Win32'; }
+  else if (/Macintosh/.test(ua)) { platform = 'macOS'; platformVersion = '14.6.1'; navPlatform = 'MacIntel'; }
+  else if (/Android/.test(ua)) { platform = 'Android'; platformVersion = '14.0.0'; navPlatform = 'Linux armv81'; mobile = /Mobile/.test(ua); model = 'Pixel 8'; }
+  else if (/CrOS/.test(ua)) { platform = 'Chrome OS'; platformVersion = '14541.0.0'; }
+  else if (/Linux|X11/.test(ua)) { platform = 'Linux'; }
+  return {
+    navPlatform,
+    metadata: {
+      brands: list(major),
+      fullVersionList: list(full),
+      fullVersion: full,
+      platform,
+      platformVersion,
+      architecture: mobile ? '' : 'x86',
+      model,
+      mobile,
+      bitness: mobile ? '' : '64',
+      wow64: false
+    },
+    headers: {
+      'sec-ch-ua': list(major).map((b) => `"${b.brand}";v="${b.version}"`).join(', '),
+      'sec-ch-ua-mobile': mobile ? '?1' : '?0',
+      'sec-ch-ua-platform': `"${platform}"`
+    }
+  };
+}
+
+module.exports = userAgents;
+module.exports.metadataFor = metadataFor;

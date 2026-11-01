@@ -10,6 +10,8 @@ const SECTIONS = [
   ['security', 'Security & lock'],
   ['permissions', 'Site settings'],
   ['downloads', 'Downloads'],
+  ['profiles', 'Profiles'],
+  ['extensions', 'Extensions'],
   ['ua', 'User agent'],
   ['sync', 'Google sync'],
   ['data', 'Clear browsing data'],
@@ -235,8 +237,65 @@ async function renderSettings(section) {
       break;
     }
 
+    case 'profiles': {
+      const r = await dex.profilesList();
+      const { current, profiles } = r.data;
+      const colors = ['#FB542B', '#A855F7', '#3B82F6', '#10B981', '#F59E0B', '#EC4899', '#14B8A6', '#64748B'];
+      const card = sCard('Your profiles');
+      for (const p of profiles) {
+        const nameBox = el('input', { value: p.name, maxLength: 30, style: 'width:150px' });
+        const actions = el('div', { style: 'display:flex;gap:6px;align-items:center' }, nameBox,
+          sBtn('Rename', async () => { const u = await dex.profilesUpdate(p.id, { name: nameBox.value }); toast(u.ok ? 'Renamed' : u.error); renderSettings('profiles'); }),
+          sBtn(p.id === current ? 'New window' : 'Open', () => dex.profilesOpen(p.id), 'primary'));
+        if (p.id !== 'default' && p.id !== current) actions.append(sBtn('Delete', async () => { if (!confirm(`Delete profile “${p.name}” and all its data?`)) return; const d = await dex.profilesDelete(p.id); toast(d.ok ? 'Profile deleted' : d.error); renderSettings('profiles'); }));
+        card.append(el('div', { className: 'srow' }, el('div', { className: 'l', style: 'display:flex;gap:10px;align-items:center' }, avatar(p), el('div', {}, el('b', {}, p.name), el('span', {}, p.id === current ? 'This window' : 'Separate history, logins and extensions'))), actions));
+      }
+      main.append(card);
+      let pickColor = colors[profiles.length % colors.length];
+      const nameInput = el('input', { placeholder: 'Profile name', maxLength: 30 });
+      const sw = el('div', { className: 'swatches' });
+      const paint = () => { sw.replaceChildren(...colors.map((c) => el('button', { className: c === pickColor ? 'on' : '', style: `background:${c}`, onclick: () => { pickColor = c; paint(); } }))); };
+      paint();
+      main.append(sCard('Add a profile',
+        sRow('Name', 'Each profile opens in its own window with its own data. You can run several at once.', nameInput),
+        sRow('Color', '', sw),
+        el('div', { className: 'srow' }, sBtn('Create and open', async () => {
+          const a = await dex.profilesAdd({ name: nameInput.value, color: pickColor });
+          if (!a.ok) { toast(a.error); return; }
+          await dex.profilesOpen(a.data.id);
+          renderSettings('profiles');
+        }, 'primary'))));
+      break;
+    }
+
+    case 'extensions': {
+      const list = PRIV ? [] : ((await dex.extensionsList()).data || []);
+      const card = sCard('Installed extensions');
+      if (!list.length) card.append(el('div', { className: 'srow' }, el('div', { className: 'l' }, el('span', {}, PRIV ? 'Extensions are disabled in private windows.' : 'No extensions installed yet.'))));
+      for (const x of list) {
+        card.append(sRow(x.name, 'v' + x.version + (x.description ? ' · ' + x.description : ''),
+          sBtn('Remove', async () => { await dex.extensionsRemove(x.id); toast('Removed'); renderSettings('extensions'); })));
+      }
+      main.append(card);
+      const idInput = el('input', { placeholder: 'Web Store link or 32-letter ID', style: 'width:280px' });
+      main.append(sCard('Add extension',
+        sRow('Chrome Web Store', 'Paste an extension link or ID, or open the store and press “Add to DexBrowse”.', idInput),
+        el('div', { className: 'srow', style: 'gap:8px;flex-wrap:wrap' },
+          sBtn('Install', async () => { if (await installFromStore(idInput.value)) renderSettings('extensions'); }, 'primary'),
+          sBtn('Open Chrome Web Store', () => { closeSettings(); createTab('https://chromewebstore.google.com/'); }),
+          sBtn('Install .crx / .zip…', async () => { const r = await dex.extensionsInstallFile(); if (r.ok && r.data) renderSettings('extensions'); else if (!r.ok) toast(r.error); }),
+          sBtn('Load unpacked…', async () => { const r = await dex.extensionsInstallUnpacked(); if (r.ok && r.data) renderSettings('extensions'); else if (!r.ok) toast(r.error); }))));
+      main.append(el('p', { className: 'extnote' }, 'DexBrowse is built on Electron, which implements a subset of the Chrome extension APIs. Most content-script extensions work; extensions that rely on toolbar popups, side panels or newer APIs may not.'));
+      break;
+    }
+
     case 'about': {
-      main.append(sCard('DexBrowse By Fuad',
+      main.append(el('div', { className: 'card brandrow' }, el('img', { src: 'icon.png', alt: '' }),
+        el('div', {}, el('h3', { style: 'margin:0' }, 'DexBrowse By Fuad'), el('span', { style: 'color:var(--muted)' }, 'A private, Chromium-based browser'))));
+      main.append(sCard('Information',
+        sRow('Developer', '', el('b', {}, cfg.developer)),
+        sRow('Brand', '', el('b', {}, 'DexBrowse By Fuad')),
+        sRow('Profile', '', el('b', {}, cfg.profile.name)),
         sRow('Version', '', el('b', {}, cfg.version)),
         sRow('Chromium', '', el('b', {}, cfg.chrome)),
         sRow('Electron', '', el('b', {}, cfg.electron))));

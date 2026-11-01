@@ -21,7 +21,8 @@ const ICONS = {
   up: '<path d="M18 15l-6-6-6 6"/>',
   down: '<path d="M6 9l6 6 6-6"/>',
   sound: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 9c1.5 1.5 1.5 4.5 0 6"/>',
-  mute: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l4 6M21 9l-4 6"/>'
+  mute: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l4 6M21 9l-4 6"/>',
+  puzzle: '<path d="M10 4a2 2 0 1 1 4 0v2h4v4h-2a2 2 0 1 0 0 4h2v4h-4v-2a2 2 0 1 0-4 0v2H6v-4h2a2 2 0 1 0 0-4H6V6h4z"/>'
 };
 const svg = (name) => `<svg viewBox="0 0 24 24">${ICONS[name]}</svg>`;
 
@@ -326,6 +327,7 @@ function updateToolbar() {
   siteicon.title = /^https:/i.test(active.url) ? 'Connection is secure' : isWeb(active.url) ? 'Connection is not secure' : '';
   $('shieldbtn').classList.toggle('off', !cfg.settings.shields.enabled);
   updateShieldBadge();
+  updateExtBar();
 }
 
 async function go(text) {
@@ -346,6 +348,9 @@ function openInternal(name) {
     case 'history': showLibrary('history'); break;
     case 'bookmarks': showLibrary('bookmarks'); break;
     case 'downloads': showLibrary('downloads'); break;
+    case 'extensions': openSettings('extensions'); break;
+    case 'profiles': openSettings('profiles'); break;
+    case 'about': case 'version': openSettings('about'); break;
     case 'newtab': case 'start': case 'home': homeUrl().then((u) => active && navigateTab(active, u)); break;
     default: toast('Unknown page: ' + name);
   }
@@ -578,7 +583,7 @@ async function showShields() {
 
 // ---------- menu and popovers ----------
 function closePops() {
-  for (const id of ['menu', 'shields-pop', 'ctx']) $(id).hidden = true;
+  for (const id of ['menu', 'shields-pop', 'ctx', 'ext-pop', 'prof-pop']) $(id).hidden = true;
 }
 
 function showMenu() {
@@ -610,9 +615,94 @@ function showMenu() {
   menu.append(el('hr'));
   if (lockEnabled) item('Lock DexBrowse', 'Ctrl+Shift+L', () => dex.lockNow());
   item(sync.signedIn ? 'Google sync: ' + sync.email : 'Sign in with Google…', '', () => showAccount());
+  item('Extensions', '', () => showExtensions());
+  item('Profiles', '', () => showProfiles());
   item('Settings', 'Ctrl+,', () => openSettings('appearance'));
+  item('About DexBrowse', '', () => openSettings('about'));
   item('Exit', '', () => dex.windowQuit());
   menu.hidden = false;
+}
+
+// ---------- extensions ----------
+const STORE_ID = /^[a-p]{32}$/;
+function storeIdOf(url) {
+  try {
+    const u = new URL(url);
+    if (!/^(chromewebstore\.google\.com|chrome\.google\.com)$/.test(u.hostname)) return null;
+    const last = u.pathname.split('/').filter(Boolean).pop() || '';
+    return STORE_ID.test(last) && /\/(detail|webstore)/.test(u.pathname) ? last : null;
+  } catch (_) { return null; }
+}
+let extBarId = null;
+function updateExtBar() {
+  const id = !PRIV && active ? storeIdOf(active.url) : null;
+  const dismissed = id && sessionStorage.getItem('extbar:' + id);
+  extBarId = id;
+  $('extbar').hidden = !id || !!dismissed;
+  if (id) $('exttext').textContent = 'Chrome Web Store extension — add it to DexBrowse?';
+}
+async function installFromStore(input) {
+  toast('Installing extension…');
+  const r = await dex.extensionsInstallStore(input);
+  toast(r.ok ? `Added ${r.data.name}` : r.error);
+  if (r.ok) refreshExtButton();
+  return r.ok;
+}
+async function refreshExtButton() {
+  const r = await dex.extensionsList();
+  $('extbtn').classList.toggle('has', r.ok && r.data.length > 0);
+  return r.ok ? r.data : [];
+}
+async function showExtensions() {
+  const pop = $('ext-pop');
+  if (!pop.hidden) { closePops(); return; }
+  closePops();
+  if (PRIV) { toast('Extensions are not available in private windows'); return; }
+  const list = await refreshExtButton();
+  pop.replaceChildren(el('b', { style: 'display:block;padding:2px 4px 6px' }, 'Extensions'));
+  if (!list.length) pop.append(el('div', { className: 'extnote' }, 'No extensions yet. Browse the Chrome Web Store and press “Add to DexBrowse”.'));
+  for (const x of list) {
+    pop.append(el('div', { className: 'extrow' },
+      x.icon ? el('img', { src: x.icon, alt: '' }) : el('span', { className: 'av', style: 'background:#64748B' }, (x.name[0] || '?').toUpperCase()),
+      el('div', { className: 't' }, el('b', {}, x.name), el('span', {}, 'v' + x.version)),
+      el('button', { onclick: async () => { await dex.extensionsRemove(x.id); toast('Removed ' + x.name); showExtensions(); showExtensions(); refreshExtButton(); } }, 'Remove')));
+  }
+  pop.append(el('hr'));
+  pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); createTab('https://chromewebstore.google.com/'); } }, 'Open Chrome Web Store'));
+  if (extBarId) pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); installFromStore(extBarId); } }, 'Add the extension on this page'));
+  pop.append(el('button', { className: 'pitem', onclick: async () => { closePops(); const r = await dex.extensionsInstallFile(); if (r.ok && r.data) { toast('Added ' + r.data.name); refreshExtButton(); } else if (!r.ok) toast(r.error); } }, 'Install from .crx / .zip file…'));
+  pop.append(el('button', { className: 'pitem', onclick: async () => { closePops(); const r = await dex.extensionsInstallUnpacked(); if (r.ok && r.data) { toast('Loaded ' + r.data.name); refreshExtButton(); } else if (!r.ok) toast(r.error); } }, 'Load unpacked folder…'));
+  pop.append(el('div', { className: 'extnote' }, 'DexBrowse runs on Electron, which supports many but not all Chrome extension APIs. Content-script extensions (dark mode, ad/cookie tools, page tweaks) work best; toolbar popups are not shown.'));
+  pop.hidden = false;
+}
+
+// ---------- profiles ----------
+function avatar(p, cls) {
+  return el('span', { className: cls || 'av', style: `background:${p.color}` }, (p.name[0] || '?').toUpperCase());
+}
+function paintProfileButton() {
+  const p = cfg.profile;
+  const b = $('profbtn');
+  b.style.background = p.color;
+  b.textContent = (p.name[0] || '?').toUpperCase();
+  b.title = 'Profile: ' + p.name;
+}
+async function showProfiles() {
+  const pop = $('prof-pop');
+  if (!pop.hidden) { closePops(); return; }
+  closePops();
+  const r = await dex.profilesList();
+  const { current, profiles } = r.data;
+  pop.replaceChildren(el('div', { className: 'pitem' }, avatar(cfg.profile), el('b', {}, cfg.profile.name), el('small', {}, PRIV ? 'Private' : 'This window')));
+  pop.append(el('hr'));
+  for (const p of profiles.filter((x) => x.id !== current)) {
+    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.profilesOpen(p.id); } }, avatar(p), p.name, el('small', {}, 'Open')));
+  }
+  pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); openSettings('profiles'); } }, el('span', { className: 'av', style: 'background:var(--field);color:var(--text)' }, '+'), 'Add or manage profiles'));
+  pop.append(el('hr'));
+  pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.windowNew(false); } }, 'New window'));
+  pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.windowNew(true); } }, 'New private window'));
+  pop.hidden = false;
 }
 
 // ---------- find, print ----------
@@ -762,7 +852,7 @@ async function boot() {
 
   for (const [id, icon] of [['newtab', 'plus'], ['back', 'back'], ['forward', 'forward'], ['reload', 'reload'], ['siteicon', 'globe'],
     ['star', 'star'], ['shieldbtn', 'shield'], ['acctbtn', 'user'], ['menubtn', 'menu'], ['findprev', 'up'], ['findnext', 'down'],
-    ['findclose', 'close'], ['savelater', 'close'], ['panel-close', 'close'], ['lockicon', 'lock']]) setIcon(id, icon);
+    ['extbtn', 'puzzle'], ['extclose', 'close'], ['findclose', 'close'], ['savelater', 'close'], ['panel-close', 'close'], ['lockicon', 'lock']]) setIcon(id, icon);
 
   $('newtab').addEventListener('click', () => createTab());
   $('back').addEventListener('click', () => perform('back'));
@@ -771,6 +861,12 @@ async function boot() {
   $('star').addEventListener('click', toggleBookmark);
   $('shieldbtn').addEventListener('click', showShields);
   $('acctbtn').addEventListener('click', showAccount);
+  $('extbtn').addEventListener('click', showExtensions);
+  $('profbtn').addEventListener('click', showProfiles);
+  $('extadd').addEventListener('click', async () => { if (extBarId && await installFromStore(extBarId)) $('extbar').hidden = true; });
+  $('extclose').addEventListener('click', () => { if (extBarId) sessionStorage.setItem('extbar:' + extBarId, '1'); $('extbar').hidden = true; });
+  paintProfileButton();
+  refreshExtButton();
   $('menubtn').addEventListener('click', showMenu);
   $('panel-close').addEventListener('click', closePanel);
   $('address').addEventListener('keydown', (e) => {
@@ -808,7 +904,7 @@ async function boot() {
   });
 
   document.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.pop') || e.target.closest('#menubtn') || e.target.closest('#shieldbtn')) return;
+    if (e.target.closest('.pop') || e.target.closest('#menubtn') || e.target.closest('#shieldbtn') || e.target.closest('#extbtn') || e.target.closest('#profbtn')) return;
     closePops();
   });
   document.addEventListener('keydown', (e) => {

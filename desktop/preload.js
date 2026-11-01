@@ -60,6 +60,18 @@ contextBridge.exposeInMainWorld('dex', {
   savePdf: call('page:savepdf'),
   activity: call('app:activity'),
 
+  extensionsList: call('extensions:list'),
+  extensionsInstallStore: call('extensions:install-store'),
+  extensionsInstallFile: call('extensions:install-file'),
+  extensionsInstallUnpacked: call('extensions:install-unpacked'),
+  extensionsRemove: call('extensions:remove'),
+
+  profilesList: call('profiles:list'),
+  profilesAdd: call('profiles:add'),
+  profilesUpdate: call('profiles:update'),
+  profilesDelete: call('profiles:delete'),
+  profilesOpen: call('profiles:open'),
+
   syncStatus: call('sync:status'),
   syncSignIn: call('sync:signin'),
   syncSignOut: call('sync:signout'),

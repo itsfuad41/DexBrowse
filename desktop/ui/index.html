@@ -24,7 +24,9 @@
       <button id="star" class="icon" title="Bookmark this page (Ctrl+D)"></button>
     </div>
     <button id="shieldbtn" class="icon" title="Shields"><span id="shieldcount" class="badge" hidden></span></button>
+    <button id="extbtn" class="icon" title="Extensions"></button>
     <button id="acctbtn" class="icon" title="Google sync"></button>
+    <button id="profbtn" title="Profiles"></button>
     <button id="menubtn" class="icon" title="Menu"></button>
   </div>
 
@@ -36,6 +38,12 @@
     <button id="findprev" class="icon" title="Previous (Shift+Enter)"></button>
     <button id="findnext" class="icon" title="Next (Enter)"></button>
     <button id="findclose" class="icon" title="Close (Esc)"></button>
+  </div>
+
+  <div id="extbar" hidden>
+    <span id="exttext"></span>
+    <button id="extadd" class="primary">Add to DexBrowse</button>
+    <button id="extclose" class="icon" title="Dismiss"></button>
   </div>
 
   <div id="savebar" hidden>
@@ -59,11 +67,13 @@
 
   <div id="shields-pop" class="pop" hidden></div>
   <div id="menu" class="pop" hidden></div>
+  <div id="ext-pop" class="pop" hidden></div>
+  <div id="prof-pop" class="pop" hidden></div>
   <div id="ctx" class="pop" hidden></div>
 
   <div id="lock" hidden>
     <div class="lockbox">
-      <div id="lockicon"></div>
+      <img id="lockicon" src="icon.png" alt="DexBrowse" width="64" height="64">
       <h1>DexBrowse is locked</h1>
       <input id="lockinput" type="password" placeholder="Passcode" autocomplete="off">
       <div id="lockerr"></div>

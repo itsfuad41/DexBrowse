@@ -75,6 +75,14 @@ Windows installer: `DexBrowse-PC-Setup.exe`. Run locally: `cd desktop && npm ins
 - **Settings page** (Ctrl+,): appearance, Shields, search engine (Brave, Google, DuckDuckGo, Bing, Startpage, Ecosia,
   Perplexity, Yahoo), startup, passwords, security, site permissions, downloads, 20 user agents, Google sync, clear data.
 - **Start page** with clock, privacy stats and top sites.
+- **Profiles**: each profile has its own history, logins, cookies and extensions and opens as its own browser
+  process, so several profiles (and any number of windows) can run at the same time. Launching DexBrowse again opens a new window.
+- **Extensions**: install from the Chrome Web Store ("Add to DexBrowse" bar on store pages, or paste a link/ID),
+  from a `.crx`/`.zip`, or load an unpacked folder. Electron implements a subset of Chrome's extension APIs, so
+  content-script extensions work best and toolbar popups are not shown.
+- **Fewer CAPTCHAs**: sends real Chrome client hints (`sec-ch-ua`, languages), hides automation flags and never
+  blocks or strips cookies for reCAPTCHA / hCaptcha / Cloudflare and major sign-in providers.
+- Developer: Md. Fuad Hasan. The app icon matches the Android app.
 
 Shortcuts: Ctrl+T new tab, Ctrl+W close, Ctrl+Shift+T reopen, Ctrl+L address bar, Ctrl+D bookmark, Ctrl+F find,
 Ctrl+P print, Ctrl+H history, Ctrl+J downloads, Ctrl+Shift+O bookmarks, Ctrl+Shift+B bookmarks bar, Ctrl+, settings,
