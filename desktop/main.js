@@ -33,6 +33,7 @@ if (GUEST) {
 }
 // Only the root process shows the passcode screen; profile and guest processes are started after it.
 const IS_LAUNCHER = !GUEST && PROFILE_ID === 'default';
+const OPEN_DEFAULT_ARG = (argv) => (argv || []).includes('--open-default'); // passcode already checked by a locked window
 const currentProfile = () => (GUEST ? { id: 'guest', name: 'Guest', color: '#64748B' }
   : registry.get(PROFILE_ID) || { id: PROFILE_ID, name: 'Default', color: '#FB542B' });
 
@@ -660,16 +661,28 @@ function lockNow() {
 
 handle('lock:status', () => ({ enabled: !GUEST, locked }));
 handle('lock:unlock', (_ctx, pass) => {
-  if (Date.now() < blockedUntil) throw new Error('Too many attempts. Try again in a few seconds.');
-  if (registry.verify(PROFILE_ID, String(pass || ''))) {
+  const value = String(pass || '');
+  if (!value) throw new Error('Enter a passcode');
+  if (registry.verify(PROFILE_ID, value)) {
     locked = false;
     failures = 0;
     lastActivity = Date.now();
     broadcast('lock', false);
-    return true;
+    return 'unlocked';
   }
-  if (++failures >= 5) { blockedUntil = Date.now() + 30000; failures = 0; }
-  throw new Error('Wrong passcode');
+  // Like the passcode screen: another profile's passcode opens that profile, two wrong ones open the guest browser.
+  const other = registry.match(value);
+  if (other) {
+    failures = 0;
+    spawnSelf(other.id === 'default' ? ['--open-default'] : [`--profile=${other.id}`]);
+    return 'other';
+  }
+  if (++failures >= 2) {
+    failures = 0;
+    spawnSelf(['--guest']);
+    return 'guest';
+  }
+  throw new Error('Incorrect passcode. One more wrong attempt opens the guest browser.');
 });
 handle('lock:now', () => lockNow());
 handle('app:activity', () => { lastActivity = Date.now(); return true; });
@@ -1071,8 +1084,9 @@ if (!gotLock) {
   app.quit();
 } else {
   // Launching DexBrowse again: the main process asks for a passcode, profile processes open another window.
-  app.on('second-instance', () => {
-    if (IS_LAUNCHER) { showLauncher(); return; }
+  app.on('second-instance', (_event, argv) => {
+    if (IS_LAUNCHER && !OPEN_DEFAULT_ARG(argv)) { showLauncher(); return; }
+    if (IS_LAUNCHER) startBrowser();
     const win = createWindow(false);
     win.once('ready-to-show', () => win.focus());
   });
@@ -1085,7 +1099,7 @@ if (!gotLock) {
       applicationVersion: app.getVersion(),
       copyright: `Developed by ${DEVELOPER} (DexBrowse By Fuad)`
     });
-    if (IS_LAUNCHER) {
+    if (IS_LAUNCHER && !OPEN_DEFAULT_ARG(process.argv)) {
       showLauncher();
     } else {
       startBrowser();

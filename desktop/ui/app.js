@@ -817,6 +817,8 @@ function showLock(state) {
 async function tryUnlock() {
   const res = await dex.lockUnlock($('lockinput').value);
   if (!res.ok) { $('lockerr').textContent = res.error; $('lockinput').select(); return; }
+  if (res.data === 'other') { $('lockerr').textContent = 'Opening that profile in a new window…'; $('lockinput').value = ''; return; }
+  if (res.data === 'guest') { $('lockerr').textContent = 'Opening guest browser…'; $('lockinput').value = ''; return; }
   showLock(false);
 }
 
@@ -922,10 +924,8 @@ async function boot() {
     $('savebar').hidden = true;
   });
   $('savelater').addEventListener('click', () => { pendingSave = null; $('savebar').hidden = true; });
-  $('locksub').textContent = 'Enter the passcode of ' + cfg.profile.name;
   $('lockgo').addEventListener('click', tryUnlock);
   $('lockinput').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
-  $('lockreset').addEventListener('click', () => dex.profilesSwitch());
 
   document.addEventListener('mousedown', (e) => {
     if (e.target.closest('.pop') || e.target.closest('#menubtn') || e.target.closest('#shieldbtn') || e.target.closest('#extbtn') || e.target.closest('#profbtn')) return;
