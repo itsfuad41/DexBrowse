@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+<title>DexBrowse By Fuad</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0B1220; color: #E5E7EB; font: 14px/1.4 system-ui, 'Segoe UI', sans-serif; }
+  .box { width: 340px; display: flex; flex-direction: column; gap: 12px; text-align: center; }
+  img { width: 72px; height: 72px; border-radius: 18px; margin: 0 auto; }
+  h1 { margin: 4px 0 0; font-size: 22px; }
+  p { margin: 0; color: #94A3B8; }
+  input { padding: 12px 14px; border-radius: 12px; border: 1px solid #334155; background: #111827; color: #fff; font-size: 15px; outline: none; text-align: center; }
+  input:focus { border-color: #FB542B; }
+  button { padding: 11px; border-radius: 12px; border: 1px solid #334155; background: #1F2937; color: #E5E7EB; font-size: 14px; cursor: pointer; }
+  button.primary { background: #FB542B; border-color: #FB542B; color: #fff; font-weight: 600; }
+  button.link { background: none; border: 0; color: #94A3B8; padding: 4px; }
+  button.link:hover { color: #fff; }
+  #msg { min-height: 18px; font-size: 12.5px; color: #94A3B8; }
+  #msg.err { color: #F87171; }
+  .screen[hidden] { display: none; }
+  .screen { display: flex; flex-direction: column; gap: 12px; }
+</style>
+</head>
+<body>
+<div class="box">
+  <img src="icon.png" alt="DexBrowse">
+  <h1>DexBrowse</h1>
+  <div id="msg"></div>
+
+  <div class="screen" id="s-login" hidden>
+    <p>Enter a profile passcode to continue</p>
+    <input id="pass" type="password" placeholder="Passcode" autocomplete="off" autofocus>
+    <button class="primary" id="open">Open browser</button>
+    <button class="link" id="to-create">Add profile</button>
+    <button class="link" id="to-recover">Forgot passcode?</button>
+  </div>
+
+  <div class="screen" id="s-create" hidden>
+    <p id="create-title">Add profile</p>
+    <p style="font-size:12.5px">Each profile has its own passcode, history, logins and extensions.</p>
+    <input id="c-name" placeholder="Profile name" maxlength="40" autocomplete="off">
+    <input id="c-pass" type="password" placeholder="Passcode (any length)" autocomplete="off">
+    <input id="c-rec" type="password" placeholder="Recovery phrase (optional)" autocomplete="off">
+    <button class="primary" id="create">Create</button>
+    <button class="link" id="create-back">Back</button>
+  </div>
+
+  <div class="screen" id="s-recover" hidden>
+    <p>Enter your recovery phrase and choose a new passcode</p>
+    <input id="r-phrase" type="password" placeholder="Recovery phrase" autocomplete="off">
+    <input id="r-pass" type="password" placeholder="New passcode" autocomplete="off">
+    <button class="primary" id="recover">Reset and open</button>
+    <button class="link" id="recover-back">Back</button>
+  </div>
+</div>
+<script src="launcher.js"></script>
+</body>
+</html>

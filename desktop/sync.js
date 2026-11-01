@@ -102,7 +102,7 @@ function page(message) {
   );
 }
 
-async function signIn() {
+async function signIn(opts = {}) {
   if (!configured()) throw new Error('Google sync is not configured in this build');
 
   const verifier = b64url(crypto.randomBytes(48));
@@ -110,7 +110,30 @@ async function signIn() {
   const expected = b64url(crypto.randomBytes(16));
   let redirect = '';
 
-  const code = await new Promise((resolve, reject) => {
+  const authUrl = (redirectUri) =>
+    'https://accounts.google.com/o/oauth2/v2/auth?' +
+    new URLSearchParams({
+      client_id: cfg.googleClientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'openid email profile',
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      state: expected,
+      prompt: 'select_account'
+    }).toString();
+
+  // In-app mode: the caller shows the Google page inside a DexBrowse window and hands back the redirect URL.
+  const inApp = typeof opts.openWindow === 'function';
+  const code = inApp ? await (async () => {
+    redirect = `http://127.0.0.1:${40000 + crypto.randomInt(20000)}`;
+    const back = new URL(await opts.openWindow(authUrl(redirect), redirect));
+    if (back.searchParams.get('error')) throw new Error('Google sign-in was cancelled');
+    if (back.searchParams.get('state') !== expected) throw new Error('Sign-in state did not match');
+    const c = back.searchParams.get('code');
+    if (!c) throw new Error('Google did not return a sign-in code');
+    return c;
+  })() : await new Promise((resolve, reject) => {
     let timer = null;
     const server = http.createServer((req, res) => {
       const u = new URL(req.url, 'http://127.0.0.1');
@@ -141,18 +164,7 @@ async function signIn() {
     });
     server.listen(0, '127.0.0.1', () => {
       redirect = `http://127.0.0.1:${server.address().port}`;
-      const url =
-        'https://accounts.google.com/o/oauth2/v2/auth?' +
-        new URLSearchParams({
-          client_id: cfg.googleClientId,
-          redirect_uri: redirect,
-          response_type: 'code',
-          scope: 'openid email profile',
-          code_challenge: challenge,
-          code_challenge_method: 'S256',
-          state: expected,
-          prompt: 'select_account'
-        }).toString();
+      const url = authUrl(redirect);
       shell.openExternal(url);
     });
   });

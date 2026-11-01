@@ -75,8 +75,16 @@ Windows installer: `DexBrowse-PC-Setup.exe`. Run locally: `cd desktop && npm ins
 - **Settings page** (Ctrl+,): appearance, Shields, search engine (Brave, Google, DuckDuckGo, Bing, Startpage, Ecosia,
   Perplexity, Yahoo), startup, passwords, security, site permissions, downloads, 20 user agents, Google sync, clear data.
 - **Start page** with clock, privacy stats and top sites.
-- **Profiles**: each profile has its own history, logins, cookies and extensions and opens as its own browser
-  process, so several profiles (and any number of windows) can run at the same time. Launching DexBrowse again opens a new window.
+- **Profiles (same as the phone app)**: every profile has its own passcode, history, logins and extensions. On start you
+  type a passcode and the profile it belongs to opens; profiles are never listed. Add profile and "Forgot passcode?"
+  (recovery phrase) are on the passcode screen. A profile can only manage or delete itself after you open it with its
+  passcode. Two wrong passcodes open a private **guest browser** (throw-away data, no sync). Each profile is its own
+  process, so several can run at once; launching DexBrowse again shows the passcode screen.
+- **Import**: Settings > Import from another browser reads bookmarks and history from Chrome, Edge, Brave, Vivaldi,
+  Opera and Firefox profiles; passwords come from the CSV export of the other browser, bookmarks also from `.html`.
+- **Saved logins for many accounts**: several usernames per site; a "DexBrowse saved logins" list appears when you
+  focus the login field and only the account you pick is filled.
+- **Google sign-in** happens in a DexBrowse window (a system-browser option is kept as fallback).
 - **Extensions**: install from the Chrome Web Store ("Add to DexBrowse" bar on store pages, or paste a link/ID),
   from a `.crx`/`.zip`, or load an unpacked folder. Electron implements a subset of Chrome's extension APIs, so
   content-script extensions work best and toolbar popups are not shown.

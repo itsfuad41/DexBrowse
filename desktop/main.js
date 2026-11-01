@@ -10,31 +10,30 @@ const sync = require('./sync');
 const makeUserAgents = require('./uas');
 const { createShields } = require('./shields');
 const { createExtensions } = require('./extensions');
+const { createProfiles } = require('./profiles');
+const importer = require('./importer');
 
 // Look like a normal browser to bot checks (navigator.webdriver stays false).
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
-// ---------- profiles: each profile is its own data folder and its own browser process ----------
+// ---------- profiles: each profile has its own passcode, data folder and browser process ----------
 const ROOT_DIR = app.getPath('userData');
-const PROFILE_COLORS = ['#FB542B', '#A855F7', '#3B82F6', '#10B981', '#F59E0B', '#EC4899', '#14B8A6', '#64748B'];
-const profilesFile = path.join(ROOT_DIR, 'profiles.json');
-
-function readProfiles() {
-  let list = [];
-  try { list = JSON.parse(fs.readFileSync(profilesFile, 'utf8')).profiles || []; } catch (_) { list = []; }
-  if (!list.some((p) => p.id === 'default')) list.unshift({ id: 'default', name: 'Default', color: PROFILE_COLORS[0] });
-  return list;
-}
-function writeProfiles(list) {
-  try {
-    fs.mkdirSync(ROOT_DIR, { recursive: true });
-    fs.writeFileSync(profilesFile, JSON.stringify({ profiles: list }));
-  } catch (_) { /* ignore */ }
-}
+const registry = createProfiles(ROOT_DIR);
 const profileArg = (process.argv.find((a) => a.startsWith('--profile=')) || '').slice('--profile='.length);
 const PROFILE_ID = /^[a-z0-9-]{1,40}$/.test(profileArg) ? profileArg : 'default';
-if (PROFILE_ID !== 'default') app.setPath('userData', path.join(ROOT_DIR, 'Profiles', PROFILE_ID));
-const currentProfile = () => readProfiles().find((p) => p.id === PROFILE_ID) || readProfiles()[0];
+// Guest browser: its own throw-away data folder (deleted on exit), private windows only, nothing synced.
+const GUEST = process.argv.includes('--guest');
+const GUEST_DIR = GUEST ? path.join(require('os').tmpdir(), 'dexbrowse-guest-' + crypto.randomBytes(4).toString('hex')) : '';
+if (GUEST) {
+  fs.mkdirSync(GUEST_DIR, { recursive: true });
+  app.setPath('userData', GUEST_DIR);
+} else if (PROFILE_ID !== 'default') {
+  app.setPath('userData', path.join(ROOT_DIR, 'Profiles', PROFILE_ID));
+}
+// Only the root process shows the passcode screen; profile and guest processes are started after it.
+const IS_LAUNCHER = !GUEST && PROFILE_ID === 'default';
+const currentProfile = () => (GUEST ? { id: 'guest', name: 'Guest', color: '#64748B' }
+  : registry.get(PROFILE_ID) || { id: PROFILE_ID, name: 'Default', color: '#FB542B' });
 
 const APP_ICON = path.join(__dirname, 'build', 'icon.png');
 const DEVELOPER = 'Md. Fuad Hasan';
@@ -158,19 +157,19 @@ function broadcast(channel, data, privFilter) {
 const currentUA = () => userAgents[settings.ua] || cleanUA;
 const sessions = () => [session.fromPartition(PARTITION), session.fromPartition(PRIVATE_PARTITION)];
 const hostPlatform = () => (process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux');
-const uaMeta = () => makeUserAgents.metadataFor(currentUA(), process.versions.chrome, hostPlatform());
+const uaMeta = (ua = currentUA()) => makeUserAgents.metadataFor(ua, process.versions.chrome, hostPlatform());
 const acceptLanguages = () => [...new Set([String(app.getLocale() || 'en-US').replace('_', '-'), 'en-US', 'en'])].join(',');
 
 // Chromium sends no client hints once the UA is overridden, and real Chrome never omits them.
 // Re-announce them (brand "Google Chrome", platform, languages) so sites do not see a bot.
-function applyUAOverride(contents) {
-  const meta = uaMeta();
+function applyUAOverride(contents, ua = currentUA()) {
+  const meta = uaMeta(ua);
   try {
     if (!contents.debugger.isAttached()) contents.debugger.attach('1.3');
   } catch (_) {
     return;
   }
-  const params = { userAgent: currentUA(), acceptLanguage: acceptLanguages() };
+  const params = { userAgent: ua, acceptLanguage: acceptLanguages() };
   if (meta) {
     params.platform = meta.navPlatform;
     params.userAgentMetadata = meta.metadata;
@@ -458,6 +457,7 @@ handle('app:config', (ctx) => ({
   downloadsDir: app.getPath('downloads'),
   secureStorage: safeStorage.isEncryptionAvailable(),
   profile: currentProfile(),
+  guest: GUEST,
   developer: DEVELOPER,
   stats
 }));
@@ -595,10 +595,16 @@ handle('logins:save', (ctx, { origin, username, password }) => {
   writeJson('logins.json', logins);
   return true;
 });
-handle('logins:fill', (ctx, origin) => {
+// Several accounts can be saved for one site. The page lists them; filling happens only for the one picked.
+handle('logins:accounts', (ctx, origin) => {
   needUnlock();
-  if (ctx.priv || !settings.autofill || !safeStorage.isEncryptionAvailable()) return null;
-  const l = logins.find((x) => x.origin === origin);
+  if (ctx.priv || !safeStorage.isEncryptionAvailable()) return [];
+  return logins.filter((x) => x.origin === origin).sort((a, b) => b.updated - a.updated).map(({ id, username }) => ({ id, username }));
+});
+handle('logins:fill', (ctx, id) => {
+  needUnlock();
+  if (ctx.priv || !safeStorage.isEncryptionAvailable()) return null;
+  const l = logins.find((x) => x.id === id);
   if (!l) return null;
   return { username: l.username, password: decryptLogin(l) };
 });
@@ -755,49 +761,101 @@ handle('extensions:install-unpacked', async (ctx) => {
 });
 handle('extensions:remove', (_ctx, id) => extensions.remove(id));
 
-// profiles
-function spawnProfile(id) {
-  const keep = process.argv.slice(1).filter((a) => /^--(no-sandbox|password-store|host-resolver-rules|disable-gpu)/.test(a));
-  const args = [...(process.defaultApp ? [app.getAppPath()] : []), ...keep, `--profile=${id}`];
+// profiles: a window only ever manages its OWN profile; other profiles are reached by typing their passcode
+const spawnSelf = (extra = []) => {
+  const keep = process.argv.slice(1).filter((x) => /^--(no-sandbox|password-store|host-resolver-rules|disable-gpu)/.test(x));
+  const args = [...(process.defaultApp ? [app.getAppPath()] : []), ...keep, ...extra];
   spawn(process.execPath, args, { detached: true, stdio: 'ignore' }).unref();
+};
+const notGuest = () => { if (GUEST) throw new Error('Not available in the guest browser'); };
+handle('profiles:current', () => currentProfile());
+handle('profiles:update', (_ctx, patch) => { notGuest(); return registry.update(PROFILE_ID, patch || {}); });
+handle('profiles:change-passcode', (_ctx, oldPass, newPass) => {
+  notGuest();
+  if (!registry.verify(PROFILE_ID, oldPass)) throw new Error('Current passcode is incorrect');
+  registry.setPasscode(PROFILE_ID, newPass);
+  return true;
+});
+handle('profiles:add', (_ctx, { name, passcode, recovery }) => {
+  notGuest();
+  registry.create({ name, passcode, recovery });
+  return true;
+});
+handle('profiles:switch', () => {
+  if (IS_LAUNCHER) showLauncher();
+  else spawnSelf(); // a plain launch reaches the passcode screen of the main process
+  return true;
+});
+handle('profiles:delete', (_ctx, passcode) => {
+  notGuest();
+  if (!registry.verify(PROFILE_ID, passcode)) throw new Error('Passcode is incorrect');
+  registry.remove(PROFILE_ID);
+  if (PROFILE_ID === 'default') {
+    for (const f of ['history', 'bookmarks', 'reading', 'logins', 'sites', 'permissions', 'stats', 'downloads', 'settings', 'session']) {
+      try { fs.rmSync(file(f + '.json'), { force: true }); } catch (_) { /* ignore */ }
+    }
+    for (const f of ['sync.json']) { try { fs.rmSync(file(f), { force: true }); } catch (_) { /* ignore */ } }
+    try { fs.rmSync(path.join(app.getPath('userData'), 'Extensions'), { recursive: true, force: true }); } catch (_) { /* ignore */ }
+  }
+  setTimeout(() => app.quit(), 200); // the data folder of other profiles is removed on the next launch
+  return true;
+});
+
+// import from other browsers
+function mergeBookmarks(items) {
+  const have = new Set(bookmarks.map((b) => b.url));
+  let n = 0;
+  for (const it of items) {
+    if (have.has(it.url)) continue;
+    have.add(it.url);
+    bookmarks.push({ id: crypto.randomUUID(), title: it.title, url: it.url, added: Date.now() });
+    n += 1;
+  }
+  writeJson('bookmarks.json', bookmarks);
+  return n;
 }
-handle('profiles:list', () => ({ current: PROFILE_ID, profiles: readProfiles() }));
-handle('profiles:add', (_ctx, { name, color }) => {
-  const clean = String(name || '').trim().slice(0, 30);
-  if (!clean) throw new Error('Enter a name for the profile');
-  const list = readProfiles();
-  if (list.some((p) => p.name.toLowerCase() === clean.toLowerCase())) throw new Error('A profile with that name already exists');
-  const profile = {
-    id: 'p-' + crypto.randomBytes(4).toString('hex'),
-    name: clean,
-    color: PROFILE_COLORS.includes(color) ? color : PROFILE_COLORS[list.length % PROFILE_COLORS.length]
-  };
-  list.push(profile);
-  writeProfiles(list);
-  return profile;
+function mergeHistory(items) {
+  const before = history.length;
+  const map = new Map(history.map((h) => [h.url, h]));
+  for (const it of items) if (!map.has(it.url)) map.set(it.url, it);
+  history = [...map.values()].sort((a, b) => b.visitedAt - a.visitedAt).slice(0, 1000);
+  writeJson('history.json', history);
+  return Math.max(0, history.length - before);
+}
+function mergeLogins(items) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is not available on this system');
+  let n = 0;
+  for (const it of items) {
+    const pw = safeStorage.encryptString(it.password).toString('base64');
+    const existing = logins.find((l) => l.origin === it.origin && l.username === it.username);
+    if (existing) Object.assign(existing, { pw, updated: Date.now() });
+    else { logins.unshift({ id: crypto.randomUUID(), origin: it.origin, username: it.username, pw, updated: Date.now() }); n += 1; }
+  }
+  writeJson('logins.json', logins);
+  return n;
+}
+const noPrivImport = (ctx) => { needUnlock(); if (ctx.priv) throw new Error('Not available in a private window'); };
+handle('import:detect', (ctx) => { noPrivImport(ctx); return importer.detect(); });
+handle('import:run', async (ctx, { id, bookmarks: wantB, history: wantH }) => {
+  noPrivImport(ctx);
+  const entry = importer.locate(id);
+  const tmp = app.getPath('temp');
+  const result = { bookmarks: 0, history: 0 };
+  if (wantB) result.bookmarks = mergeBookmarks(await importer.bookmarksFrom(entry, tmp));
+  if (wantH) result.history = mergeHistory(await importer.historyFrom(entry, tmp));
+  return result;
 });
-handle('profiles:update', (_ctx, id, patch) => {
-  const list = readProfiles();
-  const profile = list.find((p) => p.id === id);
-  if (!profile) throw new Error('Profile not found');
-  if (typeof patch.name === 'string' && patch.name.trim()) profile.name = patch.name.trim().slice(0, 30);
-  if (PROFILE_COLORS.includes(patch.color)) profile.color = patch.color;
-  writeProfiles(list);
-  return profile;
-});
-handle('profiles:delete', (_ctx, id) => {
-  if (id === 'default') throw new Error('The default profile cannot be deleted');
-  if (id === PROFILE_ID) throw new Error('Switch to another profile before deleting this one');
-  if (!/^[a-z0-9-]{1,40}$/.test(id)) throw new Error('Invalid profile');
-  fs.rmSync(path.join(ROOT_DIR, 'Profiles', id), { recursive: true, force: true });
-  writeProfiles(readProfiles().filter((p) => p.id !== id));
-  return true;
-});
-handle('profiles:open', (_ctx, id) => {
-  if (!readProfiles().some((p) => p.id === id)) throw new Error('Profile not found');
-  if (id === PROFILE_ID) createWindow(false);
-  else spawnProfile(id);
-  return true;
+handle('import:file', async (ctx, kind) => {
+  noPrivImport(ctx);
+  const csv = kind === 'passwords';
+  const { canceled, filePaths } = await dialog.showOpenDialog(ctx.win || undefined, {
+    title: csv ? 'Choose the exported passwords file (.csv)' : 'Choose the exported bookmarks file (.html)',
+    filters: csv ? [{ name: 'CSV', extensions: ['csv'] }] : [{ name: 'Bookmarks', extensions: ['html', 'htm'] }],
+    properties: ['openFile']
+  });
+  if (canceled || !filePaths[0]) return null;
+  const text = fs.readFileSync(filePaths[0], 'utf8');
+  return csv ? { passwords: mergeLogins(importer.passwordsFromCsv(text)) } : { bookmarks: mergeBookmarks(importer.parseBookmarksHtml(text)) };
 });
 
 handle('window:new', (_ctx, priv) => { createWindow(!!priv); return true; });
@@ -814,9 +872,43 @@ handle('page:savepdf', async (ctx, base64, name) => {
 
 // Google sync
 handle('sync:status', () => sync.status());
-handle('sync:signin', async () => {
+// Google sign-in happens in a DexBrowse window (no external browser). The loopback redirect is
+// intercepted before it is ever requested, so no local server is needed in this mode.
+function openAuthWindow(url, redirect, parent) {
+  return new Promise((resolve, reject) => {
+    const part = 'auth-' + crypto.randomBytes(4).toString('hex'); // in-memory, discarded afterwards
+    const win = new BrowserWindow({
+      width: 480, height: 720, parent: parent || undefined, title: 'Sign in with Google', icon: APP_ICON,
+      autoHideMenuBar: true, backgroundColor: '#ffffff',
+      webPreferences: { partition: part, contextIsolation: true, nodeIntegration: false, sandbox: true }
+    });
+    win.removeMenu();
+    let done = false;
+    const finish = (err, value) => {
+      if (done) return;
+      done = true;
+      if (!win.isDestroyed()) win.destroy();
+      session.fromPartition(part).clearStorageData().catch(() => {});
+      if (err) reject(err); else resolve(value);
+    };
+    const check = (event, target) => {
+      if (target.startsWith(redirect)) { event.preventDefault(); finish(null, target); }
+    };
+    win.webContents.setUserAgent(cleanUA, acceptLanguages());
+    applyUAOverride(win.webContents, cleanUA);
+    win.webContents.on('will-redirect', (e, u) => check(e, u));
+    win.webContents.on('will-navigate', (e, u) => check(e, u));
+    win.webContents.setWindowOpenHandler(({ url: u }) => { win.loadURL(u); return { action: 'deny' }; });
+    win.on('closed', () => finish(new Error('Google sign-in was cancelled')));
+    win.loadURL(url).catch(() => {});
+  });
+}
+
+handle('sync:signin', async (ctx, opts) => {
   needUnlock();
-  const email = await sync.signIn();
+  if (GUEST) throw new Error('Sign-in is not available in the guest browser');
+  const external = !!(opts && opts.external);
+  const email = await sync.signIn(external ? {} : { openWindow: (u, r) => openAuthWindow(u, r, ctx.win) });
   sync.pushMany(history).catch(() => {});
   return email;
 });
@@ -826,6 +918,7 @@ handle('sync:upload', async () => { needUnlock(); await sync.pushMany(history); 
 
 // ---------- windows ----------
 function createWindow(priv = false) {
+  if (GUEST) priv = true;
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -833,7 +926,7 @@ function createWindow(priv = false) {
     minHeight: 480,
     backgroundColor: priv ? '#1A0F2E' : '#0B1220',
     icon: APP_ICON,
-    title: (priv ? 'DexBrowse (Private)' : 'DexBrowse By Fuad') + (PROFILE_ID !== 'default' ? ' \u2013 ' + currentProfile().name : ''),
+    title: GUEST ? 'DexBrowse (Guest)' : (priv ? 'DexBrowse (Private)' : 'DexBrowse By Fuad') + (PROFILE_ID !== 'default' ? ' \u2013 ' + currentProfile().name : ''),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -865,63 +958,160 @@ function createWindow(priv = false) {
   return win;
 }
 
+// ---------- passcode screen (main process) ----------
+let launcherWin = null;
+let attempts = 0;
+let started = false;
+
+function showLauncher() {
+  if (launcherWin && !launcherWin.isDestroyed()) { launcherWin.show(); launcherWin.focus(); return; }
+  attempts = 0;
+  registry.cleanOrphans();
+  launcherWin = new BrowserWindow({
+    width: 460, height: 680, resizable: false, maximizable: false, title: 'DexBrowse By Fuad', icon: APP_ICON,
+    autoHideMenuBar: true, backgroundColor: '#0B1220',
+    webPreferences: { preload: path.join(__dirname, 'launcher-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
+  });
+  launcherWin.removeMenu();
+  launcherWin.webContents.on('will-navigate', (e) => e.preventDefault());
+  launcherWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  launcherWin.loadFile(path.join(__dirname, 'ui', 'launcher.html'));
+  launcherWin.on('closed', () => {
+    launcherWin = null;
+    if (BrowserWindow.getAllWindows().length === 0) app.quit();
+  });
+}
+
+function closeLauncher() {
+  const w = launcherWin;
+  launcherWin = null;
+  if (w && !w.isDestroyed()) w.destroy();
+}
+
+function openProfile(p) {
+  attempts = 0;
+  if (p.id === 'default') {
+    startBrowser();
+    createWindow(false);
+  } else {
+    spawnSelf([`--profile=${p.id}`]);
+  }
+  closeLauncher();
+  if (BrowserWindow.getAllWindows().length === 0) setTimeout(() => app.quit(), 1500);
+}
+
+function launcherHandle(channel, fn) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    if (!launcherWin || event.sender !== launcherWin.webContents) return { ok: false, error: 'Not allowed' };
+    try {
+      return { ok: true, data: await fn(...args) };
+    } catch (error) {
+      return { ok: false, error: (error && error.message) || String(error) };
+    }
+  });
+}
+
+if (IS_LAUNCHER) {
+  launcherHandle('launcher:state', () => ({ hasProfiles: registry.hasAny(), version: app.getVersion() }));
+  launcherHandle('launcher:unlock', (passcode) => {
+    const p = registry.match(String(passcode || ''));
+    if (p) { openProfile(p); return { opened: true }; }
+    attempts += 1;
+    if (attempts >= 2) {
+      // Same as the phone app: two wrong passcodes open a private guest browser.
+      spawnSelf(['--guest']);
+      closeLauncher();
+      setTimeout(() => { if (BrowserWindow.getAllWindows().length === 0) app.quit(); }, 1500);
+      return { guest: true };
+    }
+    return { opened: false, message: 'Incorrect passcode. One more wrong attempt opens the guest browser.' };
+  });
+  launcherHandle('launcher:create', ({ name, passcode, recovery }) => {
+    const first = !registry.hasAny();
+    const p = registry.create({ name, passcode, recovery });
+    if (first) { openProfile(p); return { opened: true }; }
+    return { opened: false, message: 'Profile created. Enter its passcode to open it.' };
+  });
+  launcherHandle('launcher:recover', ({ phrase, passcode }) => {
+    const p = registry.matchRecovery(String(phrase || ''));
+    if (!p) throw new Error('Recovery phrase does not match any profile');
+    registry.setPasscode(p.id, passcode);
+    openProfile(p);
+    return { opened: true };
+  });
+}
+
+// ---------- browser start ----------
+function startBrowser() {
+  if (started) return;
+  started = true;
+  const merge = (base, patch) => {
+    for (const k of Object.keys(patch || {})) {
+      if (patch[k] && typeof patch[k] === 'object' && !Array.isArray(patch[k]) && base[k]) merge(base[k], patch[k]);
+      else base[k] = patch[k];
+    }
+    return base;
+  };
+  settings = merge(JSON.parse(JSON.stringify(DEFAULTS)), readJson('settings.json', {}));
+  if (!(settings.ua in userAgents)) settings.ua = DEFAULTS.ua;
+  if (!(settings.engine in ENGINES)) settings.engine = DEFAULTS.engine;
+  history = readJson('history.json', []);
+  bookmarks = readJson('bookmarks.json', []);
+  reading = readJson('reading.json', []);
+  logins = readJson('logins.json', []);
+  siteRules = readJson('sites.json', {});
+  decisions = readJson('permissions.json', {});
+  stats = Object.assign(stats, readJson('stats.json', {}));
+  downloads = readJson('downloads.json', []).map((d) =>
+    d.state === 'progressing' || d.state === 'paused' ? Object.assign(d, { state: 'interrupted' }) : d);
+  dlSeq = downloads.reduce((m, d) => Math.max(m, d.id || 0), 0);
+  locked = !!settings.lock;
+  nativeTheme.themeSource = settings.theme;
+
+  setupSession(session.fromPartition(PARTITION), false);
+  setupSession(session.fromPartition(PRIVATE_PARTITION), true);
+  applyUserAgent();
+  extensions = createExtensions({
+    getSession: () => session.fromPartition(PARTITION),
+    dir: path.join(app.getPath('userData'), 'Extensions'),
+    chromeVersion: process.versions.chrome
+  });
+  if (!GUEST) extensions.loadAll().catch(() => {});
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  // Launching DexBrowse again opens another browser window instead of doing nothing.
+  // Launching DexBrowse again: the main process asks for a passcode, profile processes open another window.
   app.on('second-instance', () => {
+    if (IS_LAUNCHER) { showLauncher(); return; }
     const win = createWindow(false);
     win.once('ready-to-show', () => win.focus());
   });
 
   app.whenReady().then(() => {
-    const merge = (base, patch) => {
-      for (const k of Object.keys(patch || {})) {
-        if (patch[k] && typeof patch[k] === 'object' && !Array.isArray(patch[k]) && base[k]) merge(base[k], patch[k]);
-        else base[k] = patch[k];
-      }
-      return base;
-    };
-    settings = merge(JSON.parse(JSON.stringify(DEFAULTS)), readJson('settings.json', {}));
-    if (!(settings.ua in userAgents)) settings.ua = DEFAULTS.ua;
-    if (!(settings.engine in ENGINES)) settings.engine = DEFAULTS.engine;
-    history = readJson('history.json', []);
-    bookmarks = readJson('bookmarks.json', []);
-    reading = readJson('reading.json', []);
-    logins = readJson('logins.json', []);
-    siteRules = readJson('sites.json', {});
-    decisions = readJson('permissions.json', {});
-    stats = Object.assign(stats, readJson('stats.json', {}));
-    downloads = readJson('downloads.json', []).map((d) =>
-      d.state === 'progressing' || d.state === 'paused' ? Object.assign(d, { state: 'interrupted' }) : d);
-    dlSeq = downloads.reduce((m, d) => Math.max(m, d.id || 0), 0);
-    locked = !!settings.lock;
-    nativeTheme.themeSource = settings.theme;
-
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'editMenu' }]));
     app.setAboutPanelOptions({
       applicationName: 'DexBrowse',
       applicationVersion: app.getVersion(),
       copyright: `Developed by ${DEVELOPER} (DexBrowse By Fuad)`
     });
-    setupSession(session.fromPartition(PARTITION), false);
-    setupSession(session.fromPartition(PRIVATE_PARTITION), true);
-    applyUserAgent();
-    extensions = createExtensions({
-      getSession: () => session.fromPartition(PARTITION),
-      dir: path.join(app.getPath('userData'), 'Extensions'),
-      chromeVersion: process.versions.chrome
-    });
-    extensions.loadAll().catch(() => {});
-    createWindow(false);
+    if (IS_LAUNCHER) {
+      showLauncher();
+    } else {
+      startBrowser();
+      createWindow(false);
+    }
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow(false);
+      if (BrowserWindow.getAllWindows().length === 0) { if (IS_LAUNCHER) showLauncher(); else createWindow(false); }
     });
   });
 
-  app.on('before-quit', () => writeJson('stats.json', stats));
+  app.on('before-quit', () => { if (started) writeJson('stats.json', stats); });
+  app.on('quit', () => { if (GUEST) fs.rmSync(GUEST_DIR, { recursive: true, force: true }); });
   app.on('window-all-closed', () => {
+    if (launcherWin) return;
     if (process.platform !== 'darwin') app.quit();
   });
 }

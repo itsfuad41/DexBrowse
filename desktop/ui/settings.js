@@ -14,6 +14,7 @@ const SECTIONS = [
   ['extensions', 'Extensions'],
   ['ua', 'User agent'],
   ['sync', 'Google sync'],
+  ['import', 'Import from another browser'],
   ['data', 'Clear browsing data'],
   ['about', 'About DexBrowse']
 ];
@@ -238,33 +239,40 @@ async function renderSettings(section) {
     }
 
     case 'profiles': {
-      const r = await dex.profilesList();
-      const { current, profiles } = r.data;
+      const me = cfg.profile;
+      if (cfg.guest) { main.append(sCard('Guest browser', sRow('Nothing is saved', 'This is a guest session. Its data is deleted when you close it.', null))); break; }
+      const nameBox = el('input', { value: me.name, maxLength: 40, style: 'width:180px' });
       const colors = ['#FB542B', '#A855F7', '#3B82F6', '#10B981', '#F59E0B', '#EC4899', '#14B8A6', '#64748B'];
-      const card = sCard('Your profiles');
-      for (const p of profiles) {
-        const nameBox = el('input', { value: p.name, maxLength: 30, style: 'width:150px' });
-        const actions = el('div', { style: 'display:flex;gap:6px;align-items:center' }, nameBox,
-          sBtn('Rename', async () => { const u = await dex.profilesUpdate(p.id, { name: nameBox.value }); toast(u.ok ? 'Renamed' : u.error); renderSettings('profiles'); }),
-          sBtn(p.id === current ? 'New window' : 'Open', () => dex.profilesOpen(p.id), 'primary'));
-        if (p.id !== 'default' && p.id !== current) actions.append(sBtn('Delete', async () => { if (!confirm(`Delete profile “${p.name}” and all its data?`)) return; const d = await dex.profilesDelete(p.id); toast(d.ok ? 'Profile deleted' : d.error); renderSettings('profiles'); }));
-        card.append(el('div', { className: 'srow' }, el('div', { className: 'l', style: 'display:flex;gap:10px;align-items:center' }, avatar(p), el('div', {}, el('b', {}, p.name), el('span', {}, p.id === current ? 'This window' : 'Separate history, logins and extensions'))), actions));
-      }
-      main.append(card);
-      let pickColor = colors[profiles.length % colors.length];
-      const nameInput = el('input', { placeholder: 'Profile name', maxLength: 30 });
       const sw = el('div', { className: 'swatches' });
-      const paint = () => { sw.replaceChildren(...colors.map((c) => el('button', { className: c === pickColor ? 'on' : '', style: `background:${c}`, onclick: () => { pickColor = c; paint(); } }))); };
+      const paint = () => { sw.replaceChildren(...colors.map((c) => el('button', { className: c === cfg.profile.color ? 'on' : '', style: `background:${c}`, onclick: async () => { const u = await dex.profilesUpdate({ color: c }); if (u.ok) { cfg.profile = Object.assign(cfg.profile, u.data); paintProfileButton(); paint(); } } }))); };
       paint();
-      main.append(sCard('Add a profile',
-        sRow('Name', 'Each profile opens in its own window with its own data. You can run several at once.', nameInput),
+      main.append(sCard('This profile',
+        sRow('Name', 'Other profiles are never shown here. You only manage the profile you opened with its passcode.',
+          el('div', { style: 'display:flex;gap:6px' }, nameBox, sBtn('Save', async () => { const u = await dex.profilesUpdate({ name: nameBox.value }); if (u.ok) { cfg.profile = Object.assign(cfg.profile, u.data); paintProfileButton(); toast('Saved'); } else toast(u.error); }))),
         sRow('Color', '', sw),
-        el('div', { className: 'srow' }, sBtn('Create and open', async () => {
-          const a = await dex.profilesAdd({ name: nameInput.value, color: pickColor });
-          if (!a.ok) { toast(a.error); return; }
-          await dex.profilesOpen(a.data.id);
-          renderSettings('profiles');
-        }, 'primary'))));
+        sRow('Switch profile', 'Opens the passcode screen. The passcode you type decides which profile opens.', sBtn('Switch…', () => dex.profilesSwitch(), 'primary'))));
+
+      const oldP = el('input', { type: 'password', placeholder: 'Current passcode' });
+      const newP = el('input', { type: 'password', placeholder: 'New passcode' });
+      const rec = el('input', { type: 'password', placeholder: 'New recovery phrase' });
+      main.append(sCard('Passcode',
+        sRow('Change passcode', 'Any length. It must differ from the passcodes of your other profiles.', el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, oldP, newP,
+          sBtn('Change', async () => { const r = await dex.profilesChangePasscode(oldP.value, newP.value); toast(r.ok ? 'Passcode changed' : r.error); if (r.ok) { oldP.value = ''; newP.value = ''; } }))),
+        sRow('Recovery phrase', me.hasRecovery ? 'A recovery phrase is set. Enter a new one to replace it.' : 'Lets you reset a forgotten passcode from the passcode screen.',
+          el('div', { style: 'display:flex;gap:6px' }, rec, sBtn('Save', async () => { const r = await dex.profilesUpdate({ recovery: rec.value }); toast(r.ok ? 'Recovery phrase saved' : r.error); if (r.ok) { rec.value = ''; cfg.profile.hasRecovery = true; } })))));
+
+      const aName = el('input', { placeholder: 'Profile name', maxLength: 40 });
+      const aPass = el('input', { type: 'password', placeholder: 'Passcode' });
+      const aRec = el('input', { type: 'password', placeholder: 'Recovery phrase (optional)' });
+      main.append(sCard('Add a profile',
+        sRow('New profile', 'It will not appear in any list. Open it later by typing its passcode on the passcode screen.',
+          el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, aName, aPass, aRec,
+            sBtn('Create', async () => { const r = await dex.profilesAdd({ name: aName.value, passcode: aPass.value, recovery: aRec.value }); toast(r.ok ? 'Profile created. Use Switch profile and enter its passcode.' : r.error); if (r.ok) { aName.value = ''; aPass.value = ''; aRec.value = ''; } }, 'primary')))));
+
+      const delP = el('input', { type: 'password', placeholder: 'Passcode to confirm' });
+      main.append(sCard('Delete this profile',
+        sRow('Delete', 'Removes this profile and all its history, bookmarks, logins and extensions. DexBrowse will close.',
+          el('div', { style: 'display:flex;gap:6px' }, delP, sBtn('Delete profile', async () => { if (!confirm(`Delete the profile “${me.name}” and all its data?`)) return; const r = await dex.profilesDelete(delP.value); if (!r.ok) toast(r.error); }, 'danger')))));
       break;
     }
 
@@ -286,6 +294,33 @@ async function renderSettings(section) {
           sBtn('Install .crx / .zip…', async () => { const r = await dex.extensionsInstallFile(); if (r.ok && r.data) renderSettings('extensions'); else if (!r.ok) toast(r.error); }),
           sBtn('Load unpacked…', async () => { const r = await dex.extensionsInstallUnpacked(); if (r.ok && r.data) renderSettings('extensions'); else if (!r.ok) toast(r.error); }))));
       main.append(el('p', { className: 'extnote' }, 'DexBrowse is built on Electron, which implements a subset of the Chrome extension APIs. Most content-script extensions work; extensions that rely on toolbar popups, side panels or newer APIs may not.'));
+      break;
+    }
+
+    case 'import': {
+      if (PRIV) { main.append(sCard('Import', sRow('Not available in private windows', '', null))); break; }
+      const found = (await dex.importDetect()).data || [];
+      const card = sCard('Browsers found on this computer');
+      if (!found.length) card.append(el('div', { className: 'msg' }, 'No other browser profiles were found. You can still import files below.'));
+      for (const f of found) {
+        const wb = el('input', { type: 'checkbox', checked: true });
+        const wh = el('input', { type: 'checkbox', checked: true });
+        card.append(sRow(`${f.browser} – ${f.name}`, 'If the browser is open, close it first so its history can be read.',
+          el('div', { className: 'item-line' },
+            el('label', {}, wb, ' Bookmarks'), el('label', {}, wh, ' History'),
+            sBtn('Import', async (e) => {
+              e.target.disabled = true;
+              const r = await dex.importRun({ id: f.id, bookmarks: wb.checked, history: wh.checked });
+              e.target.disabled = false;
+              if (r.ok) { toast(`Imported ${r.data.bookmarks} bookmarks and ${r.data.history} history entries`); await refreshBookmarks(); } else toast(r.error);
+            }, 'primary'))));
+      }
+      main.append(card);
+      main.append(sCard('From a file',
+        sRow('Passwords (.csv)', 'In the other browser open its password manager and use “Export passwords”, then choose that file here. Delete the file afterwards because it is not encrypted.',
+          sBtn('Choose file…', async () => { const r = await dex.importFile('passwords'); if (r.ok && r.data) toast(`Imported ${r.data.passwords} passwords`); else if (!r.ok) toast(r.error); }, 'primary')),
+        sRow('Bookmarks (.html)', 'Works with the bookmarks file exported by any browser.',
+          sBtn('Choose file…', async () => { const r = await dex.importFile('bookmarks'); if (r.ok && r.data) { toast(`Imported ${r.data.bookmarks} bookmarks`); await refreshBookmarks(); } else if (!r.ok) toast(r.error); }))));
       break;
     }
 

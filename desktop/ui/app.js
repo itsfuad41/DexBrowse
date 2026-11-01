@@ -349,6 +349,7 @@ function openInternal(name) {
     case 'bookmarks': showLibrary('bookmarks'); break;
     case 'downloads': showLibrary('downloads'); break;
     case 'extensions': openSettings('extensions'); break;
+    case 'import': openSettings('import'); break;
     case 'profiles': openSettings('profiles'); break;
     case 'about': case 'version': openSettings('about'); break;
     case 'newtab': case 'start': case 'home': homeUrl().then((u) => active && navigateTab(active, u)); break;
@@ -515,17 +516,24 @@ async function refreshSync() {
   btn.title = sync.signedIn ? 'Google sync: ' + sync.email : 'Sign in with Google to sync history';
 }
 
-async function signIn() {
+async function signIn(external) {
   if (!sync.configured) { toast('Google sync is not set up in this build'); return; }
-  toast('Finish signing in with Google in your browser');
-  const res = await dex.syncSignIn();
+  toast('Sign in with Google in the window that just opened');
+  const res = await dex.syncSignIn({ external: !!external });
   await refreshSync();
   toast(res.ok ? 'Signed in as ' + res.data : 'Sign-in failed: ' + res.error);
 }
 
 async function showAccount() {
   await refreshSync();
-  if (!sync.signedIn) { await signIn(); return; }
+  if (!sync.signedIn) {
+    const body = openPanel('account', 'Google sync');
+    body.append(el('div', { className: 'note' }, 'Sign in with Google to sync your history with the DexBrowse phone app. Sign-in opens in a DexBrowse window.'),
+      el('div', { className: 'actions' },
+        el('button', { onclick: () => { closePanel(); signIn(false); } }, 'Sign in with Google'),
+        el('button', { onclick: () => { closePanel(); signIn(true); } }, 'Use system browser instead')));
+    return;
+  }
   const body = openPanel('account', 'Google sync');
   body.append(el('div', { className: 'note' }, 'Signed in as ' + sync.email),
     el('div', { className: 'actions' },
@@ -601,6 +609,7 @@ function showMenu() {
   item('Downloads', 'Ctrl+J', () => showLibrary('downloads'));
   item('Reading list', 'Ctrl+Shift+S', () => showLibrary('reading'));
   item('Passwords', '', () => openSettings('passwords'));
+  item('Import from another browser…', '', () => openSettings('import'));
   menu.append(el('hr'));
   const pct = () => Math.round(Math.pow(1.2, active ? active.zoom : 0) * 100) + '%';
   const label = el('span', {}, 'Zoom ' + pct());
@@ -616,7 +625,7 @@ function showMenu() {
   if (lockEnabled) item('Lock DexBrowse', 'Ctrl+Shift+L', () => dex.lockNow());
   item(sync.signedIn ? 'Google sync: ' + sync.email : 'Sign in with Google…', '', () => showAccount());
   item('Extensions', '', () => showExtensions());
-  item('Profiles', '', () => showProfiles());
+  item('Profile: ' + cfg.profile.name, '', () => showProfiles());
   item('Settings', 'Ctrl+,', () => openSettings('appearance'));
   item('About DexBrowse', '', () => openSettings('about'));
   item('Exit', '', () => dex.windowQuit());
@@ -691,15 +700,13 @@ async function showProfiles() {
   const pop = $('prof-pop');
   if (!pop.hidden) { closePops(); return; }
   closePops();
-  const r = await dex.profilesList();
-  const { current, profiles } = r.data;
-  pop.replaceChildren(el('div', { className: 'pitem' }, avatar(cfg.profile), el('b', {}, cfg.profile.name), el('small', {}, PRIV ? 'Private' : 'This window')));
+  pop.replaceChildren(el('div', { className: 'pitem' }, avatar(cfg.profile), el('b', {}, cfg.profile.name), el('small', {}, cfg.guest ? 'Guest' : 'This window')));
   pop.append(el('hr'));
-  for (const p of profiles.filter((x) => x.id !== current)) {
-    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.profilesOpen(p.id); } }, avatar(p), p.name, el('small', {}, 'Open')));
+  if (!cfg.guest) {
+    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.profilesSwitch(); } }, 'Switch profile (enter passcode)'));
+    pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); openSettings('profiles'); } }, 'Manage this profile / add a profile'));
+    pop.append(el('hr'));
   }
-  pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); openSettings('profiles'); } }, el('span', { className: 'av', style: 'background:var(--field);color:var(--text)' }, '+'), 'Add or manage profiles'));
-  pop.append(el('hr'));
   pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.windowNew(false); } }, 'New window'));
   pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); dex.windowNew(true); } }, 'New private window'));
   pop.hidden = false;
@@ -745,9 +752,18 @@ async function onGuestMessage(tab, e) {
   const current = (() => { try { return new URL(tab.view.getURL()).origin; } catch (_) { return ''; } })();
   if (data.origin !== current) return;
   if (e.channel === 'login-request') {
-    if (!cfg.settings.autofill || !(/^https:/.test(data.origin) || /^http:\/\/(localhost|127\.0\.0\.1)/.test(data.origin))) return;
-    const res = await dex.loginsFill(data.origin);
-    if (res.ok && res.data) tab.view.send('login-fill', res.data);
+    if (!(/^https:/.test(data.origin) || /^http:\/\/(localhost|127\.0\.0\.1)/.test(data.origin))) return;
+    const res = await dex.loginsAccounts(data.origin);
+    if (!res.ok || !res.data.length) return;
+    if (res.data.length === 1 && cfg.settings.autofill) {
+      const one = await dex.loginsFill(res.data[0].id);
+      if (one.ok && one.data) tab.view.send('login-fill', one.data);
+    } else {
+      tab.view.send('login-accounts', res.data);
+    }
+  } else if (e.channel === 'login-pick') {
+    const one = await dex.loginsFill(data.id);
+    if (one.ok && one.data) tab.view.send('login-fill', one.data);
   } else if (e.channel === 'login-submit') {
     if (!cfg.settings.savePasswords || cfg.settings.neverSave.includes(data.origin)) return;
     const now = Date.now();

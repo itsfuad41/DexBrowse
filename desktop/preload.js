@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('dex', {
 
   loginsList: call('logins:list'),
   loginsSave: call('logins:save'),
+  loginsAccounts: call('logins:accounts'),
   loginsFill: call('logins:fill'),
   loginsReveal: call('logins:reveal'),
   loginsDelete: call('logins:delete'),
@@ -66,11 +67,16 @@ contextBridge.exposeInMainWorld('dex', {
   extensionsInstallUnpacked: call('extensions:install-unpacked'),
   extensionsRemove: call('extensions:remove'),
 
-  profilesList: call('profiles:list'),
-  profilesAdd: call('profiles:add'),
+  importDetect: call('import:detect'),
+  importRun: call('import:run'),
+  importFile: call('import:file'),
+
+  profilesCurrent: call('profiles:current'),
   profilesUpdate: call('profiles:update'),
+  profilesChangePasscode: call('profiles:change-passcode'),
+  profilesAdd: call('profiles:add'),
+  profilesSwitch: call('profiles:switch'),
   profilesDelete: call('profiles:delete'),
-  profilesOpen: call('profiles:open'),
 
   syncStatus: call('sync:status'),
   syncSignIn: call('sync:signin'),
