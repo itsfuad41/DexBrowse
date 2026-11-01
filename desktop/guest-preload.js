@@ -1,6 +1,39 @@
 // Runs inside every web page tab (top frame). Detects login form submits so
 // DexBrowse can offer to save them, and fills saved logins when asked.
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webFrame } = require('electron');
+
+// ---- page-world shims (run before the page's own scripts) ----
+// 1) Notifications: this engine reports "granted" for everything, so a site could show notifications
+//    without asking. Pages see "default" until you answer, and the prompt appears when they ask.
+try {
+  const state = ipcRenderer.sendSync('perm:state', location.origin);
+  webFrame.executeJavaScript(`(() => {
+    const N = window.Notification;
+    if (!N) return;
+    let st = ${JSON.stringify(state)};
+    const ask = N.requestPermission.bind(N);
+    Object.defineProperty(N, 'permission', { get: () => st, configurable: true });
+    N.requestPermission = function (cb) {
+      return ask().then((r) => { st = r; if (typeof cb === 'function') { try { cb(r); } catch (e) {} } return r; });
+    };
+    const q = navigator.permissions && navigator.permissions.query.bind(navigator.permissions);
+    if (q) navigator.permissions.query = (d) => (d && d.name === 'notifications'
+      ? Promise.resolve({ name: 'notifications', state: st === 'default' ? 'prompt' : st, onchange: null, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false })
+      : q(d));
+  })();`).catch(() => {});
+} catch (_) { /* ignore */ }
+
+// 2) Google refuses sign-in from embedded Chromium ("This browser or app may not be secure"),
+//    so on its sign-in pages the page sees a Firefox-style browser, like other desktop apps do.
+if (/^accounts\.(google|youtube)\.com$/.test(location.hostname)) {
+  webFrame.executeJavaScript(`(() => {
+    const FF = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0';
+    const def = (k, v) => { try { Object.defineProperty(Navigator.prototype, k, { get: () => v, configurable: true }); } catch (e) {} };
+    def('userAgent', FF); def('appVersion', '5.0 (Windows)'); def('vendor', ''); def('platform', 'Win32');
+    def('productSub', '20100101'); def('userAgentData', undefined);
+    try { delete window.chrome; } catch (e) {}
+  })();`).catch(() => {});
+}
 
 const TEXTLIKE = ['text', 'email', 'tel', 'search', ''];
 const isVisible = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);

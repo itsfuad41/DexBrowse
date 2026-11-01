@@ -33,6 +33,9 @@ contextBridge.exposeInMainWorld('dex', {
   shieldsSiteReset: call('shields:site-reset'),
   shieldsStats: call('shields:stats'),
 
+  bookmarksUpdate: call('bookmarks:update'),
+  bookmarksReorder: call('bookmarks:reorder'),
+  suggest: call('suggest:query'),
   loginsList: call('logins:list'),
   loginsSave: call('logins:save'),
   loginsAccounts: call('logins:accounts'),

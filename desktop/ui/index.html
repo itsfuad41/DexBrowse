@@ -26,6 +26,7 @@
     </div>
     <button id="shieldbtn" class="icon" title="Shields"><span id="shieldcount" class="badge" hidden></span></button>
     <button id="extbtn" class="icon" title="Extensions"></button>
+    <button id="uabtn" class="icon" title="User agent"></button>
     <button id="profbtn" title="Profiles"></button>
     <button id="menubtn" class="icon" title="Menu"></button>
   </div>
@@ -69,6 +70,14 @@
   <div id="shields-pop" class="pop" hidden></div>
   <div id="menu" class="pop" hidden></div>
   <div id="ext-pop" class="pop" hidden></div>
+  <div id="ua-pop" class="pop" hidden></div>
+  <div id="suggest" class="pop" hidden></div>
+  <div id="editdlg" class="pop" hidden>
+    <b>Edit bookmark</b>
+    <input id="ed-title" type="text" placeholder="Title" spellcheck="false">
+    <input id="ed-url" type="text" placeholder="Address" spellcheck="false">
+    <div class="row"><button id="ed-cancel">Cancel</button><button id="ed-save" class="primary">Save</button></div>
+  </div>
   <div id="prof-pop" class="pop" hidden></div>
   <div id="ctx" class="pop" hidden></div>
 
@@ -91,6 +100,7 @@
 
   <div id="toast" hidden></div>
   <script src="app.js"></script>
+  <script src="extras.js"></script>
   <script src="settings.js"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 const {
-  app, BrowserWindow, ipcMain, session, shell, dialog, Menu, webContents, nativeTheme, clipboard, safeStorage
+  app, BrowserWindow, ipcMain, session, shell, dialog, Menu, webContents, nativeTheme, clipboard, safeStorage, net
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -16,6 +16,10 @@ const { createUpdater } = require('./updater');
 
 // Look like a normal browser to bot checks (navigator.webdriver stays false).
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+// Lower memory use: fewer renderer processes, smaller disk cache, no background Chrome services we do not use.
+app.commandLine.appendSwitch('renderer-process-limit', '8');
+app.commandLine.appendSwitch('disk-cache-size', String(150 * 1024 * 1024));
+app.commandLine.appendSwitch('disable-features', 'Translate,MediaRouter,OptimizationHints,InterestFeedContentSuggestions');
 
 // ---------- profiles: each profile has its own passcode, data folder and browser process ----------
 const ROOT_DIR = app.getPath('userData');
@@ -37,7 +41,7 @@ const OPEN_DEFAULT_ARG = (argv) => (argv || []).includes('--open-default'); // p
 const currentProfile = () => (GUEST ? { id: 'guest', name: 'Guest', color: '#64748B' }
   : registry.get(PROFILE_ID) || { id: PROFILE_ID, name: 'Default', color: '#FB542B' });
 
-const APP_ICON = path.join(__dirname, 'build', 'icon.png');
+const APP_ICON = path.join(__dirname, 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
 const DEVELOPER = 'Md. Fuad Hasan';
 
 // Present as plain Chromium: drop the "Electron/x" and app-name tokens.
@@ -87,6 +91,11 @@ const DEFAULTS = {
   webrtc: true,
   autofill: true,
   savePasswords: true,
+  perm: { notifications: 'ask', microphone: 'ask', camera: 'ask', speaker: 'allow' },
+  searchSuggest: true,
+  bookmarksBarMode: 'always', // always | newtab
+  memorySaver: true,
+  sleepMinutes: 15,
   autoLockMinutes: 0,
   lockShortcut: 'Ctrl+Shift+L',
   autoUpdate: true,
@@ -144,7 +153,15 @@ function sanitize(patch) {
   if (typeof patch.homepage === 'string') out.homepage = patch.homepage.slice(0, 500);
   if ([0, 1, 2, 5, 10, 15, 30, 60].includes(patch.autoLockMinutes)) out.autoLockMinutes = patch.autoLockMinutes;
   if (typeof patch.lockShortcut === 'string' && validLockShortcut(patch.lockShortcut)) out.lockShortcut = patch.lockShortcut;
-  ['bookmarksBar', 'askDownload', 'webrtc', 'autofill', 'savePasswords', 'autoUpdate'].forEach(bool);
+['bookmarksBar', 'askDownload', 'webrtc', 'autofill', 'savePasswords', 'autoUpdate', 'searchSuggest', 'memorySaver'].forEach(bool);
+  if (['always', 'newtab'].includes(patch.bookmarksBarMode)) out.bookmarksBarMode = patch.bookmarksBarMode;
+  if ([5, 10, 15, 30, 60].includes(patch.sleepMinutes)) out.sleepMinutes = patch.sleepMinutes;
+  if (patch.perm && typeof patch.perm === 'object') {
+    out.perm = {};
+    for (const k of ['notifications', 'microphone', 'camera', 'speaker']) {
+      if (['ask', 'allow', 'block'].includes(patch.perm[k]) && !(k === 'notifications' && patch.perm[k] === 'allow')) out.perm[k] = patch.perm[k];
+    }
+  }
   if (patch.shields && typeof patch.shields === 'object') {
     out.shields = {};
     for (const k of ['enabled', 'ads', 'https', 'cookies', 'gpc']) {
@@ -197,7 +214,15 @@ function applyUAOverride(contents, ua = currentUA()) {
   contents.debugger.sendCommand('Emulation.setUserAgentOverride', params).catch(() => {});
 }
 
+const FIREFOX_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0';
+const GOOGLE_SIGNIN = /^accounts\.(google|youtube)\.com$/;
 function decorateHeaders(headers, reqUrl) {
+  // Google rejects embedded Chromium on its sign-in pages; present a Firefox-style request there.
+  if (GOOGLE_SIGNIN.test(reqUrl.hostname)) {
+    for (const k of Object.keys(headers)) if (/^sec-ch-ua/i.test(k)) delete headers[k];
+    headers['User-Agent'] = FIREFOX_UA;
+    return;
+  }
   const meta = uaMeta();
   if (!meta) return;
   const secure = reqUrl.protocol === 'https:' || reqUrl.hostname === 'localhost' || reqUrl.hostname === '127.0.0.1';
@@ -245,45 +270,102 @@ const shields = createShields({
 setInterval(() => writeJson('stats.json', stats), 10000).unref();
 
 // ---------- permissions ----------
+// Nothing is allowed silently: the first request from a site asks (unless you set a default in Settings),
+// and the answer is remembered per site. Pages also only see "granted" after you allowed it.
 const AUTO_ALLOW = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'window-management']);
-const ASK = {
-  media: 'use your camera and/or microphone',
+const PERM_TEXT = {
   notifications: 'show notifications',
+  microphone: 'use your microphone',
+  camera: 'use your camera',
+  speaker: 'choose which speaker plays sound',
   midi: 'use MIDI devices',
   'clipboard-read': 'read your clipboard',
   'display-capture': 'share your screen'
 };
+const hostFromUrl = (u) => { try { return new URL(u).host; } catch (_) { return ''; } };
+
+function permKeys(permission, mediaTypes) {
+  if (permission === 'media') {
+    const keys = [];
+    for (const t of mediaTypes || []) { if (t === 'audio') keys.push('microphone'); if (t === 'video') keys.push('camera'); }
+    return keys.length ? keys : ['microphone', 'camera'];
+  }
+  if (permission === 'speaker-selection') return ['speaker'];
+  if (permission === 'notifications') return ['notifications'];
+  return PERM_TEXT[permission] ? [permission] : [];
+}
+// true = allowed, false = blocked, undefined = ask
+function permDecision(host, key, priv) {
+  const mode = settings.perm && settings.perm[key];
+  if (mode === 'block') return false;
+  const known = priv ? privDecisions.get(`${host}|${key}`) : decisions[`${host}|${key}`];
+  if (known !== undefined) return known;
+  if (mode === 'allow') return true;
+  return undefined;
+}
+function remember(host, key, allowed, priv) {
+  if (priv) { privDecisions.set(`${host}|${key}`, allowed); return; }
+  decisions[`${host}|${key}`] = allowed;
+  writeJson('permissions.json', decisions);
+}
+
+ipcMain.on('perm:state', (event, origin) => {
+  const priv = isPriv(event.sender);
+  const d = permDecision(hostFromUrl(origin), 'notifications', priv);
+  event.returnValue = d === true ? 'granted' : d === false ? 'denied' : 'default';
+});
 
 function setupSession(ses, priv) {
   shields.attach(ses);
 
+  ses.setPermissionCheckHandler((_wc, permission, origin, details) => {
+    if (AUTO_ALLOW.has(permission)) return true;
+    const host = hostFromUrl(origin || (details && details.requestingUrl));
+    let types = [];
+    if (permission === 'media' && details && details.mediaType) types = details.mediaType === 'unknown' ? [] : [details.mediaType];
+    const keys = permKeys(permission, types);
+    if (!keys.length) return false;
+    return keys.every((k) => permDecision(host, k, priv) === true);
+  });
+
   ses.setPermissionRequestHandler(async (wc, permission, callback, details) => {
     if (AUTO_ALLOW.has(permission)) return callback(true);
-    if (!ASK[permission]) return callback(false);
-    let host = 'This site';
-    try {
-      host = new URL(details.requestingUrl).host;
-    } catch (_) {
-      /* keep default */
-    }
-    const key = `${host}|${permission}`;
-    const known = priv ? privDecisions.get(key) : decisions[key];
-    if (known !== undefined) return callback(known);
+    const keys = permKeys(permission, details && details.mediaTypes);
+    if (!keys.length) return callback(false);
+    const host = hostFromUrl(details.requestingUrl) || 'This site';
+    const states = keys.map((k) => permDecision(host, k, priv));
+    if (states.includes(false)) return callback(false);
+    if (states.every((x) => x === true)) return callback(true);
+    const need = keys.filter((_k, i) => states[i] === undefined);
+    const text = need.map((k) => PERM_TEXT[k]).join(' and ');
     const { response } = await dialog.showMessageBox(winOf(wc) || undefined, {
       type: 'question',
       buttons: ['Allow', 'Block'],
       defaultId: 1,
       cancelId: 1,
       title: 'Permission request',
-      message: `${host} wants to ${ASK[permission]}.`
+      message: `${host} wants to ${text}.`,
+      detail: priv ? 'This choice is forgotten when you close the private window.' : 'You can change this later in Settings > Site settings.'
     });
     const allowed = response === 0;
-    if (priv) privDecisions.set(key, allowed);
-    else {
-      decisions[key] = allowed;
-      writeJson('permissions.json', decisions);
-    }
+    for (const k of need) remember(host, k, allowed, priv);
     callback(allowed);
+  });
+
+  // screen sharing in calls: always confirm, then share the main screen
+  ses.setDisplayMediaRequestHandler(async (request, callback) => {
+    try {
+      const { response } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow() || undefined, {
+        type: 'question', buttons: ['Share my screen', 'Cancel'], defaultId: 1, cancelId: 1,
+        title: 'Screen sharing', message: `${hostFromUrl(request.securityOrigin) || 'This site'} wants to share your screen.`
+      });
+      if (response !== 0) return callback({});
+      const { desktopCapturer } = require('electron');
+      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      callback(sources[0] ? { video: sources[0] } : {});
+    } catch (_) {
+      callback({});
+    }
   });
 
   ses.on('will-download', (_event, item, wc) => {
@@ -433,6 +515,13 @@ app.on('web-contents-created', (_event, contents) => {
   contents.setUserAgent(currentUA(), acceptLanguages());
   applyUAOverride(contents);
   contents.setWebRTCIPHandlingPolicy(settings.webrtc ? 'default_public_interface_only' : 'default');
+  contents.on('devtools-opened', () => { // developer tools get the DexBrowse icon too, not the Electron default
+    try {
+      const dt = contents.devToolsWebContents;
+      const w = dt && BrowserWindow.fromWebContents(dt);
+      if (w) w.setIcon(APP_ICON);
+    } catch (_) { /* ignore */ }
+  });
   contents.setWindowOpenHandler(({ url }) => {
     const host = hostOf(contents);
     if (!host.isDestroyed()) host.send('open-tab', url);
@@ -483,8 +572,9 @@ handle('app:config', (ctx) => ({
 }));
 
 handle('settings:set', (_ctx, patch) => {
-  const { shields: shieldPatch, ...rest } = sanitize(patch || {});
+  const { shields: shieldPatch, perm: permPatch, ...rest } = sanitize(patch || {});
   Object.assign(settings, rest);
+  if (permPatch) Object.assign(settings.perm, permPatch);
   if (shieldPatch) Object.assign(settings.shields, shieldPatch);
   if (rest.theme) nativeTheme.themeSource = settings.theme;
   saveSettings();
@@ -502,7 +592,8 @@ handle('ua:set', (_ctx, name) => {
   if (!(name in userAgents)) throw new Error('Unknown user agent');
   settings.ua = name;
   saveSettings();
-  applyUserAgent();
+  applyUserAgent(); // open pages keep their identity until you reload them
+  broadcast('settings-changed', publicSettings());
   return true;
 });
 
@@ -543,6 +634,57 @@ const listApi = (name, getList, setList, fileName) => {
   });
 };
 listApi('bookmarks', () => bookmarks, (v) => { bookmarks = v; }, 'bookmarks.json');
+handle('bookmarks:update', (ctx, id, patch) => {
+  needUnlock();
+  if (ctx.priv) throw new Error('Not available in a private window');
+  const b = bookmarks.find((x) => x.id === id);
+  if (!b) throw new Error('Bookmark not found');
+  if (typeof patch.title === 'string' && patch.title.trim()) b.title = patch.title.trim().slice(0, 200);
+  if (typeof patch.url === 'string' && /^https?:\/\//i.test(patch.url)) b.url = patch.url;
+  writeJson('bookmarks.json', bookmarks);
+  return bookmarks;
+});
+handle('bookmarks:reorder', (ctx, ids) => {
+  needUnlock();
+  if (ctx.priv || !Array.isArray(ids)) throw new Error('Not available');
+  const byId = new Map(bookmarks.map((b) => [b.id, b]));
+  const next = ids.map((i) => byId.get(i)).filter(Boolean);
+  for (const b of bookmarks) if (!next.includes(b)) next.push(b);
+  bookmarks = next;
+  writeJson('bookmarks.json', bookmarks);
+  return bookmarks;
+});
+
+// address bar suggestions: your bookmarks and history first, then the search engine's own suggestions
+const SUGGEST = {
+  'Brave Search': 'https://search.brave.com/api/suggest?q=',
+  Google: 'https://suggestqueries.google.com/complete/search?client=firefox&q=',
+  DuckDuckGo: 'https://ac.duckduckgo.com/ac/?type=list&q=',
+  Bing: 'https://api.bing.com/osjson.aspx?query='
+};
+handle('suggest:query', async (ctx, text) => {
+  needUnlock();
+  const q = String(text || '').trim().slice(0, 200);
+  if (!q) return { local: [], remote: [] };
+  const words = q.toLowerCase().split(/\s+/);
+  const hit = (title, url) => { const hay = `${title} ${url}`.toLowerCase(); return words.every((w) => hay.includes(w)); };
+  const local = [];
+  if (!ctx.priv) {
+    for (const b of bookmarks) if (local.length < 6 && hit(b.title, b.url)) local.push({ kind: 'bookmark', title: b.title, url: b.url });
+    for (const h of history) if (local.length < 6 && hit(h.title, h.url) && !local.some((x) => x.url === h.url)) local.push({ kind: 'history', title: h.title, url: h.url });
+  }
+  let remote = [];
+  const endpoint = SUGGEST[settings.engine];
+  if (settings.searchSuggest && endpoint && !/^[a-z]+:\/\//i.test(q)) {
+    try {
+      const res = await net.fetch(endpoint + encodeURIComponent(q), { signal: AbortSignal.timeout(2500), headers: { Accept: 'application/json' } });
+      const json = await res.json();
+      const list = Array.isArray(json) ? (Array.isArray(json[1]) ? json[1] : json.map((x) => x && x.phrase).filter(Boolean)) : [];
+      remote = list.filter((x) => typeof x === 'string').slice(0, 6);
+    } catch (_) { /* offline or blocked: local suggestions only */ }
+  }
+  return { local, remote };
+});
 listApi('reading', () => reading, (v) => { reading = v; }, 'reading.json');
 
 // downloads
@@ -670,19 +812,18 @@ handle('lock:unlock', (_ctx, pass) => {
     broadcast('lock', false);
     return 'unlocked';
   }
-  // Like the passcode screen: another profile's passcode opens that profile, two wrong ones open the guest browser.
+  // Like the passcode screen: another profile's passcode opens that profile in place of this locked
+  // browser, and two wrong passcodes open the guest browser. Nothing tells the person which happened.
   const other = registry.match(value);
-  if (other) {
+  const leave = (args) => {
     failures = 0;
-    spawnSelf(other.id === 'default' ? ['--open-default'] : [`--profile=${other.id}`]);
-    return 'other';
-  }
-  if (++failures >= 2) {
-    failures = 0;
-    spawnSelf(['--guest']);
-    return 'guest';
-  }
-  throw new Error('Incorrect passcode. One more wrong attempt opens the guest browser.');
+    spawnSelf(args);
+    setTimeout(() => app.quit(), 900);
+    return 'opening';
+  };
+  if (other) return leave(other.id === 'default' ? ['--open-default'] : [`--profile=${other.id}`]);
+  if (++failures >= 2) return leave(['--guest']);
+  throw new Error('Incorrect passcode');
 });
 handle('lock:now', () => lockNow());
 handle('app:activity', () => { lastActivity = Date.now(); return true; });
@@ -870,7 +1011,7 @@ function openAuthWindow(url, redirect, parent) {
     const win = new BrowserWindow({
       width: 480, height: 720, parent: parent || undefined, title: 'Sign in with Google', icon: APP_ICON,
       autoHideMenuBar: true, backgroundColor: '#ffffff',
-      webPreferences: { partition: part, contextIsolation: true, nodeIntegration: false, sandbox: true }
+      webPreferences: { partition: part, preload: path.join(__dirname, 'auth-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
     });
     win.removeMenu();
     let done = false;
@@ -884,8 +1025,13 @@ function openAuthWindow(url, redirect, parent) {
     const check = (event, target) => {
       if (target.startsWith(redirect)) { event.preventDefault(); finish(null, target); }
     };
-    win.webContents.setUserAgent(cleanUA, acceptLanguages());
-    applyUAOverride(win.webContents, cleanUA);
+    win.webContents.setUserAgent(FIREFOX_UA, acceptLanguages());
+    session.fromPartition(part).webRequest.onBeforeSendHeaders((d, cb) => {
+      const h = d.requestHeaders;
+      for (const k of Object.keys(h)) if (/^sec-ch-ua/i.test(k)) delete h[k];
+      h['User-Agent'] = FIREFOX_UA;
+      cb({ requestHeaders: h });
+    });
     win.webContents.on('will-redirect', (e, u) => check(e, u));
     win.webContents.on('will-navigate', (e, u) => check(e, u));
     win.webContents.setWindowOpenHandler(({ url: u }) => { win.loadURL(u); return { action: 'deny' }; });
@@ -1023,7 +1169,7 @@ if (IS_LAUNCHER) {
       setTimeout(() => { if (BrowserWindow.getAllWindows().length === 0) app.quit(); }, 1500);
       return { guest: true };
     }
-    return { opened: false, message: 'Incorrect passcode. One more wrong attempt opens the guest browser.' };
+    return { opened: false, message: 'Incorrect passcode' };
   });
   launcherHandle('launcher:create', ({ name, passcode, recovery }) => {
     const first = !registry.hasAny();

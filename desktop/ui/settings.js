@@ -12,6 +12,7 @@ const SECTIONS = [
   ['downloads', 'Downloads'],
   ['profiles', 'Profiles'],
   ['extensions', 'Extensions'],
+  ['performance', 'Performance & memory'],
   ['ua', 'User agent'],
   ['sync', 'Google sync'],
   ['import', 'Import from another browser'],
@@ -78,7 +79,8 @@ async function renderSettings(section) {
       main.append(sCard('Theme',
         sRow('Color theme', 'Dark, light, or follow your system.', sSelect([['dark', 'Dark'], ['light', 'Light'], ['system', 'Same as system']], s.theme, (v) => setSetting({ theme: v })))),
         sCard('Toolbar',
-          sRow('Show bookmarks bar', 'Ctrl+Shift+B', switchEl(s.bookmarksBar, (v) => setSetting({ bookmarksBar: v})))));
+          sRow('Show bookmarks bar', 'Ctrl+Shift+B', switchEl(s.bookmarksBar, (v) => setSetting({ bookmarksBar: v}))),
+          sRow('Bookmarks bar shows', 'Drag bookmarks to reorder them, right-click to edit or delete.', sSelect([['always', 'On every page'], ['newtab', 'Only on the new tab page']], s.bookmarksBarMode, (v) => setSetting({ bookmarksBarMode: v})))));
       break;
 
     case 'shields': {
@@ -115,6 +117,18 @@ async function renderSettings(section) {
         card.append(sRow(name, hostOf(cfg.engines[name]), sBtn(name === s.engine ? 'Default' : 'Make default', () => setSetting({ engine: name }), name === s.engine ? '' : '')));
       }
       main.append(card);
+      main.append(sCard('Address bar',
+        sRow('Show search suggestions', 'While you type, DexBrowse asks your search engine for suggestions (Brave, Google, DuckDuckGo and Bing). Bookmarks and history are always suggested locally.', switchEl(s.searchSuggest, (v) => setSetting({ searchSuggest: v })))));
+      break;
+    }
+
+    case 'performance': {
+      main.append(sCard('Memory saver',
+        sRow('Put unused tabs to sleep', 'Tabs you have not looked at for a while are unloaded and reload when you click them. Pinned tabs, tabs playing sound and the current tab are never put to sleep.', switchEl(s.memorySaver, (v) => setSetting({ memorySaver: v }))),
+        sRow('Sleep tabs after', '', sSelect([[5, '5 minutes'], [10, '10 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']], s.sleepMinutes, (v) => setSetting({ sleepMinutes: Number(v) })))));
+      main.append(sCard('Also reducing memory',
+        sRow('Fewer browser processes', 'DexBrowse limits the number of page processes and the disk cache size automatically.', null),
+        sRow('Close what you do not need', 'Each profile you open and each private window runs its own browser process.', null)));
       break;
     }
 
@@ -194,12 +208,20 @@ async function renderSettings(section) {
     }
 
     case 'permissions': {
+      const pm = s.perm;
+      const sel = (key, opts) => sSelect(opts, pm[key], async (v) => { const r = await setSetting({ perm: { [key]: v } }); if (r.ok) cfg.settings = r.data; });
+      main.append(sCard('Notifications, calls and sound',
+        sRow('Notifications', 'Sites can only show notifications after you allow them. They appear as system notifications.', sel('notifications', [['ask', 'Ask me'], ['block', 'Block all']])),
+        sRow('Microphone', 'For calls and voice messages.', sel('microphone', [['ask', 'Ask me'], ['allow', 'Allow on every site'], ['block', 'Block all']])),
+        sRow('Camera', 'For video calls.', sel('camera', [['ask', 'Ask me'], ['allow', 'Allow on every site'], ['block', 'Block all']])),
+        sRow('Speaker selection', 'Lets call sites choose which speaker or headset plays the sound.', sel('speaker', [['allow', 'Allow on every site'], ['ask', 'Ask me'], ['block', 'Block all']]))));
+      const label = { notifications: 'Notifications', microphone: 'Microphone', camera: 'Camera', speaker: 'Speaker selection', media: 'Camera / microphone', midi: 'MIDI devices', 'clipboard-read': 'Clipboard', 'display-capture': 'Screen sharing' };
       const res = await dex.permissionsList();
-      const card = sCard('Permissions you answered');
+      const card = sCard('Sites you answered');
       const list = res.ok ? res.data : [];
       if (!list.length) card.append(el('div', { className: 'msg' }, 'No saved site permissions.'));
       for (const p of list) {
-        card.append(sRow(p.host, `${p.permission}: ${p.allowed ? 'Allowed' : 'Blocked'}`, sBtn('Reset', async () => { await dex.permissionsRemove(p.key); renderSettings('permissions'); })));
+        card.append(sRow(p.host, `${label[p.permission] || p.permission}: ${p.allowed ? 'Allowed' : 'Blocked'}`, sBtn('Reset', async () => { await dex.permissionsRemove(p.key); renderSettings('permissions'); })));
       }
       main.append(card);
       break;
@@ -220,8 +242,9 @@ async function renderSettings(section) {
         card.append(sRow(name, '', sBtn(name === res.data.current ? 'In use' : 'Use', async () => {
           const r = await dex.uaSet(name);
           if (!r.ok) { toast(r.error); return; }
-          for (const t of tabs) if (t.ready && isWeb(t.url)) t.view.reloadIgnoringCache();
-          toast('User agent: ' + name);
+          cfg.settings.ua = name;
+          paintUABtn();
+          toast('User agent: ' + name + '. Open pages are not reloaded; reload a tab to use it.');
           renderSettings('ua');
         })));
       }

@@ -16,7 +16,7 @@ async function unlock() {
   const r = await launcher.unlock(value);
   $('pass').value = '';
   if (!r.ok) show('login', r.error, true);
-  else if (r.data.guest) show('login', 'Opening guest browser…');
+  else if (r.data.guest) show('login', 'Opening…');
   else if (r.data.opened) show('login', 'Opening…');
   else show('login', r.data.message, true);
 }

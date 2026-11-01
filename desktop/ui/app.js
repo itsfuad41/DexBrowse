@@ -133,21 +133,12 @@ async function homeUrl() {
 }
 
 // ---------- tabs ----------
-function createTab(url, activate = true, opts = {}) {
+function buildView(tab) {
   const view = document.createElement('webview');
   view.setAttribute('partition', PARTITION);
   view.setAttribute('allowpopups', '');
   view.setAttribute('plugins', '');
   view.setAttribute('preload', cfg.guestPreload);
-
-  const startPage = !url || url === 'dex://start';
-  const tab = {
-    id: ++seq, view, title: 'New tab', url: startPage ? START_BASE : url, loading: false, favicon: '',
-    ready: false, recorded: '', zoom: 0, pinned: !!opts.pinned, audible: false, muted: false,
-    blocked: 0, wcId: null, failedUrl: null
-  };
-  if (tab.pinned) tabs.splice(tabs.filter((t) => t.pinned).length, 0, tab);
-  else tabs.push(tab);
 
   view.addEventListener('dom-ready', () => {
     tab.ready = true;
@@ -192,6 +183,21 @@ function createTab(url, activate = true, opts = {}) {
   view.addEventListener('leave-html-full-screen', () => document.body.classList.remove('fs'));
   view.addEventListener('ipc-message', (e) => onGuestMessage(tab, e));
 
+  return view;
+}
+
+function createTab(url, activate = true, opts = {}) {
+  const startPage = !url || url === 'dex://start';
+  const tab = {
+    id: ++seq, view: null, lastActive: Date.now(), sleeping: false, title: 'New tab', url: startPage ? START_BASE : url, loading: false, favicon: '',
+    ready: false, recorded: '', zoom: 0, pinned: !!opts.pinned, audible: false, muted: false,
+    blocked: 0, wcId: null, failedUrl: null
+  };
+  if (tab.pinned) tabs.splice(tabs.filter((t) => t.pinned).length, 0, tab);
+  else tabs.push(tab);
+
+  const view = buildView(tab);
+  tab.view = view;
   $('views').append(view);
   if (startPage) buildStartUrl().then((u) => view.setAttribute('src', u));
   else view.setAttribute('src', url);
@@ -201,7 +207,32 @@ function createTab(url, activate = true, opts = {}) {
   return tab;
 }
 
+// ---------- memory saver: tabs you have not used for a while are put to sleep ----------
+function sleepTab(tab) {
+  if (tab.sleeping || tab === active || tab.pinned || tab.audible || tab.loading || !tab.ready || !tab.view) return;
+  tab.sleeping = true;
+  tab.sleepUrl = tab.failedUrl || tab.url;
+  tab.view.remove();
+  tab.view = null;
+  tab.ready = false;
+  tab.wcId = null;
+  renderTabs();
+}
+function wakeTab(tab) {
+  if (!tab.sleeping) return;
+  tab.sleeping = false;
+  tab.view = buildView(tab);
+  $('views').append(tab.view);
+  tab.view.setAttribute('src', tab.sleepUrl || tab.url);
+}
+setInterval(() => {
+  if (!cfg || !cfg.settings.memorySaver) return;
+  const limit = cfg.settings.sleepMinutes * 60000;
+  for (const t of tabs) if (t !== active && Date.now() - t.lastActive > limit) sleepTab(t);
+}, 30000);
+
 function navigateTab(tab, url) {
+  wakeTab(tab);
   if (tab.ready) tab.view.loadURL(url).catch(() => {});
   else tab.view.setAttribute('src', url);
 }
@@ -223,8 +254,11 @@ function recordVisit(tab) {
 
 function activateTab(tab) {
   closeSettings();
+  if (active && active !== tab) active.lastActive = Date.now();
+  tab.lastActive = Date.now();
+  wakeTab(tab);
   active = tab;
-  for (const t of tabs) t.view.classList.toggle('active', t === tab);
+  for (const t of tabs) if (t.view) t.view.classList.toggle('active', t === tab);
   renderTabs();
   updateToolbar();
   $('findcount').textContent = '';
@@ -236,7 +270,7 @@ function closeTab(tab) {
   if (index < 0) return;
   if (isWeb(tab.url)) closed.push(tab.url);
   tabs.splice(index, 1);
-  tab.view.remove();
+  if (tab.view) tab.view.remove();
   if (!tabs.length) { createTab(); return; }
   if (active === tab) activateTab(tabs[Math.min(index, tabs.length - 1)]);
   else renderTabs();
@@ -255,7 +289,7 @@ function renderTabs() {
   const strip = $('tabs');
   strip.replaceChildren();
   for (const tab of tabs) {
-    const node = el('div', { className: 'tab' + (tab === active && !settingsOpen ? ' active' : '') + (tab.pinned ? ' pinned' : ''), title: tab.title });
+    const node = el('div', { className: 'tab' + (tab === active && !settingsOpen ? ' active' : '') + (tab.pinned ? ' pinned' : '') + (tab.sleeping ? ' sleeping' : ''), title: tab.title + (tab.sleeping ? ' (sleeping to save memory)' : '') });
     if (tab.loading) node.append(el('span', { className: 'spin' }));
     else if (tab.favicon) node.append(el('img', { src: tab.favicon, alt: '' }));
     else if (isStart(tab.url)) node.append(el('img', { src: 'icon.png', alt: '' }));
@@ -338,6 +372,7 @@ function updateToolbar() {
   $('shieldbtn').classList.toggle('off', !cfg.settings.shields.enabled);
   updateShieldBadge();
   updateExtBar();
+  updateBarVisibility();
 }
 
 async function go(text) {
@@ -373,16 +408,6 @@ async function refreshBookmarks() {
   bookmarks = res.ok ? res.data : [];
   renderBookmarkBar();
   if (active) updateToolbar();
-}
-
-function renderBookmarkBar() {
-  const bar = $('bmbar');
-  bar.hidden = !cfg.settings.bookmarksBar;
-  bar.replaceChildren();
-  if (!bookmarks.length) { bar.append(el('span', { className: 'hint' }, 'Bookmarks you add appear here (Ctrl+D)')); return; }
-  for (const b of bookmarks.slice(0, 20)) {
-    bar.append(el('button', { className: 'chip', title: b.url, onclick: () => go(b.url) }, b.title));
-  }
 }
 
 async function toggleBookmark() {
@@ -598,7 +623,7 @@ async function showShields() {
 
 // ---------- menu and popovers ----------
 function closePops() {
-  for (const id of ['menu', 'shields-pop', 'ctx', 'ext-pop', 'prof-pop']) $(id).hidden = true;
+  for (const id of ['menu', 'shields-pop', 'ctx', 'ext-pop', 'prof-pop', 'ua-pop', 'suggest']) $(id).hidden = true;
 }
 
 function showMenu() {
@@ -817,8 +842,7 @@ function showLock(state) {
 async function tryUnlock() {
   const res = await dex.lockUnlock($('lockinput').value);
   if (!res.ok) { $('lockerr').textContent = res.error; $('lockinput').select(); return; }
-  if (res.data === 'other') { $('lockerr').textContent = 'Opening that profile in a new window…'; $('lockinput').value = ''; return; }
-  if (res.data === 'guest') { $('lockerr').textContent = 'Opening guest browser…'; $('lockinput').value = ''; return; }
+  if (res.data === 'opening') { $('lockerr').textContent = 'Opening…'; $('lockinput').value = ''; return; }
   showLock(false);
 }
 
@@ -894,11 +918,13 @@ async function boot() {
   $('extadd').addEventListener('click', async () => { if (extBarId && await installFromStore(extBarId)) $('extbar').hidden = true; });
   $('extclose').addEventListener('click', () => { if (extBarId) sessionStorage.setItem('extbar:' + extBarId, '1'); $('extbar').hidden = true; });
   paintProfileButton();
+  initExtras();
   refreshExtButton();
   $('menubtn').addEventListener('click', showMenu);
   $('panel-close').addEventListener('click', closePanel);
   $('address').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') go($('address').value);
+    if (onAddressKey(e)) return;
+    if (e.key === 'Enter') { hideSuggest(); go($('address').value); }
     if (e.key === 'Escape') { updateToolbar(); active && active.view.focus(); }
   });
   $('address').addEventListener('focus', () => $('address').select());
@@ -928,7 +954,7 @@ async function boot() {
   $('lockinput').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
 
   document.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.pop') || e.target.closest('#menubtn') || e.target.closest('#shieldbtn') || e.target.closest('#extbtn') || e.target.closest('#profbtn')) return;
+    if (e.target.closest('.pop') || e.target.closest('#menubtn') || e.target.closest('#shieldbtn') || e.target.closest('#extbtn') || e.target.closest('#profbtn') || e.target.closest('#uabtn')) return;
     closePops();
   });
   document.addEventListener('keydown', (e) => {

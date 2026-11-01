@@ -215,3 +215,24 @@ body.locked #views, body.locked #bmbar { visibility: hidden; }
 .lockbox p { margin: 0; color: var(--muted); }
 .kbdbtn { min-width: 150px; font-family: ui-monospace, Consolas, monospace; }
 .kbdbtn.rec { border-color: var(--accent); color: var(--accent); }
+
+#uabtn { color: var(--muted); }
+#ua-pop { top: 78px; right: 44px; width: 300px; padding: 10px; }
+#ua-pop .ualist { max-height: 60vh; overflow: auto; }
+#ua-pop .pitem.on { background: var(--hover); color: var(--accent2); }
+#suggest { top: 80px; left: 118px; right: 190px; padding: 4px; min-width: 0; z-index: 35; }
+.sug { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 12px; border-radius: 8px; }
+.sug.on, .sug:hover { background: var(--hover); }
+.sug .sk { width: 18px; text-align: center; color: var(--muted); flex: none; }
+.sug .st { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sug .st em { font-style: normal; color: var(--muted); margin-left: 10px; font-size: 12px; }
+#editdlg { top: 120px; left: 50%; transform: translateX(-50%); width: 380px; padding: 16px; display: flex; flex-direction: column; gap: 10px; z-index: 50; }
+#editdlg[hidden] { display: none; }
+#editdlg input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); color: var(--text); font: inherit; outline: none; }
+#editdlg .row { display: flex; gap: 8px; justify-content: flex-end; }
+#editdlg button { padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line); }
+#editdlg button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+#bmbar .chip.more { margin-left: auto; color: var(--muted); }
+#bmbar .chip.drag { opacity: .4; }
+#bmbar .chip.over { box-shadow: inset 2px 0 0 var(--accent); }
+.tab.sleeping { opacity: .55; }

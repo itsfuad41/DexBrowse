@@ -40,6 +40,17 @@ jobs:
           DEXBROWSE_FIREBASE_PROJECT_ID: ${{ secrets.DEXBROWSE_FIREBASE_PROJECT_ID }}
         run: npm run dist
 
+      - name: Check exe icon
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $exe = (Resolve-Path "desktop/dist/win-unpacked/DexBrowse.exe").Path
+          $bmp = [System.Drawing.Icon]::ExtractAssociatedIcon($exe).ToBitmap()
+          $c = $bmp.GetPixel([int]($bmp.Width / 2), [int]($bmp.Height - 4))
+          Write-Host "exe icon sample pixel: $($c.R),$($c.G),$($c.B) (DexBrowse icon base is light, Electron default is not)"
+          if ($c.A -eq 0) { Write-Host "::warning::exe icon sample is transparent" }
+
       - name: Verify installer
         shell: bash
         run: |
