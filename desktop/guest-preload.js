@@ -23,17 +23,37 @@ try {
   })();`).catch(() => {});
 } catch (_) { /* ignore */ }
 
-// 2) Google refuses sign-in from embedded Chromium ("This browser or app may not be secure"),
-//    so on its sign-in pages the page sees a Firefox-style browser, like other desktop apps do.
-if (/^accounts\.(google|youtube)\.com$/.test(location.hostname)) {
-  webFrame.executeJavaScript(`(() => {
-    const FF = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0';
-    const def = (k, v) => { try { Object.defineProperty(Navigator.prototype, k, { get: () => v, configurable: true }); } catch (e) {} };
-    def('userAgent', FF); def('appVersion', '5.0 (Windows)'); def('vendor', ''); def('platform', 'Win32');
-    def('productSub', '20100101'); def('userAgentData', undefined);
-    try { delete window.chrome; } catch (e) {}
-  })();`).catch(() => {});
-}
+// 2) Embedded Chromium has an empty window.chrome; a real Chrome page has app, csi and loadTimes.
+//    Google's sign-in checks for this, so give pages the same objects Chrome does.
+webFrame.executeJavaScript(`(() => {
+    // A real Chrome page has these; an embedded Chromium has an empty window.chrome, which Google treats as "not a browser".
+    const w = window;
+    if (!w.chrome) w.chrome = {};
+    const c = w.chrome;
+    const nat = (fn, name) => { try { Object.defineProperty(fn, 'name', { value: name }); fn.toString = () => 'function ' + name + '() { [native code] }'; } catch (e) {} return fn; };
+    if (!c.app) c.app = {
+      isInstalled: false,
+      InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+      RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+      getDetails: nat(function () { return null; }, 'getDetails'),
+      getIsInstalled: nat(function () { return false; }, 'getIsInstalled'),
+      installState: nat(function (cb) { if (typeof cb === 'function') cb('not_installed'); }, 'installState'),
+      runningState: nat(function () { return 'cannot_run'; }, 'runningState')
+    };
+    if (!c.csi) c.csi = nat(function () {
+      const t = performance.timing;
+      return { onloadT: t.domContentLoadedEventEnd, startE: t.navigationStart, pageT: Date.now() - t.navigationStart, tran: 15 };
+    }, 'csi');
+    if (!c.loadTimes) c.loadTimes = nat(function () {
+      const t = performance.timing;
+      return {
+        requestTime: t.navigationStart / 1000, startLoadTime: t.navigationStart / 1000, commitLoadTime: t.responseStart / 1000,
+        finishDocumentLoadTime: t.domContentLoadedEventEnd / 1000, finishLoadTime: t.loadEventEnd / 1000,
+        firstPaintTime: t.responseEnd / 1000, firstPaintAfterLoadTime: 0, navigationType: 'Other',
+        wasFetchedViaSpdy: true, wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2'
+      };
+    }, 'loadTimes');
+})();`).catch(() => {});
 
 const TEXTLIKE = ['text', 'email', 'tel', 'search', ''];
 const isVisible = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);

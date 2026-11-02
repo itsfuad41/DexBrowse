@@ -86,7 +86,7 @@ Windows installer: `DexBrowse-PC-Setup.exe`. Run locally: `cd desktop && npm ins
   focus the login field and only the account you pick is filled.
 - **Permissions**: notifications, microphone, camera, speaker selection and screen sharing always ask first (or follow the
   default you set in Settings > Site settings); sites cannot show notifications silently. Allowed notifications appear as system notifications.
-- **Google sign-in** pages get a Firefox-style identity so Google does not refuse the browser.
+- **Google sign-in**: pages get the same `window.chrome` objects and client hints as real Chrome; if Google still refuses, a bar offers to continue in your default browser (Google sync does this automatically).
 - **User agent button** in the toolbar switches identity without reloading open tabs.
 - **Address bar suggestions** from bookmarks, history and your search engine; bookmarks bar with drag to reorder, edit/delete menu and "only on new tab" mode.
 - **Memory saver**: unused tabs sleep (Settings > Performance & memory).

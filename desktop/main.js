@@ -214,15 +214,7 @@ function applyUAOverride(contents, ua = currentUA()) {
   contents.debugger.sendCommand('Emulation.setUserAgentOverride', params).catch(() => {});
 }
 
-const FIREFOX_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0';
-const GOOGLE_SIGNIN = /^accounts\.(google|youtube)\.com$/;
 function decorateHeaders(headers, reqUrl) {
-  // Google rejects embedded Chromium on its sign-in pages; present a Firefox-style request there.
-  if (GOOGLE_SIGNIN.test(reqUrl.hostname)) {
-    for (const k of Object.keys(headers)) if (/^sec-ch-ua/i.test(k)) delete headers[k];
-    headers['User-Agent'] = FIREFOX_UA;
-    return;
-  }
   const meta = uaMeta();
   if (!meta) return;
   const secure = reqUrl.protocol === 'https:' || reqUrl.hostname === 'localhost' || reqUrl.hostname === '127.0.0.1';
@@ -989,6 +981,11 @@ handle('import:file', async (ctx, kind) => {
   return csv ? { passwords: mergeLogins(importer.passwordsFromCsv(text)) } : { bookmarks: mergeBookmarks(importer.parseBookmarksHtml(text)) };
 });
 
+handle('external:open', (_ctx, url) => {
+  if (!/^https?:\/\//i.test(String(url))) throw new Error('Only web addresses can be opened');
+  shell.openExternal(String(url));
+  return true;
+});
 handle('window:new', (_ctx, priv) => { createWindow(!!priv); return true; });
 handle('app:quit', () => { app.quit(); return true; });
 handle('page:savepdf', async (ctx, base64, name) => {
@@ -1025,13 +1022,13 @@ function openAuthWindow(url, redirect, parent) {
     const check = (event, target) => {
       if (target.startsWith(redirect)) { event.preventDefault(); finish(null, target); }
     };
-    win.webContents.setUserAgent(FIREFOX_UA, acceptLanguages());
-    session.fromPartition(part).webRequest.onBeforeSendHeaders((d, cb) => {
-      const h = d.requestHeaders;
-      for (const k of Object.keys(h)) if (/^sec-ch-ua/i.test(k)) delete h[k];
-      h['User-Agent'] = FIREFOX_UA;
-      cb({ requestHeaders: h });
-    });
+    win.webContents.setUserAgent(cleanUA, acceptLanguages());
+    applyUAOverride(win.webContents, cleanUA);
+    // Google sometimes still refuses embedded sign-in; detect its error page and let the caller use the default browser.
+    const looksBlocked = () => win.webContents.executeJavaScript('document.body ? document.body.innerText : ""')
+      .then((t) => { if (/may not be secure|Couldn.t sign you in/i.test(String(t))) finish(new Error('GOOGLE_BLOCKED')); })
+      .catch(() => {});
+    win.webContents.on('did-finish-load', () => { looksBlocked(); setTimeout(looksBlocked, 1500); });
     win.webContents.on('will-redirect', (e, u) => check(e, u));
     win.webContents.on('will-navigate', (e, u) => check(e, u));
     win.webContents.setWindowOpenHandler(({ url: u }) => { win.loadURL(u); return { action: 'deny' }; });
@@ -1044,7 +1041,14 @@ handle('sync:signin', async (ctx, opts) => {
   needUnlock();
   if (GUEST) throw new Error('Sign-in is not available in the guest browser');
   const external = !!(opts && opts.external);
-  const email = await sync.signIn(external ? {} : { openWindow: (u, r) => openAuthWindow(u, r, ctx.win) });
+  let email;
+  try {
+    email = await sync.signIn(external ? {} : { openWindow: (u, r) => openAuthWindow(u, r, ctx.win) });
+  } catch (error) {
+    // Google refuses sign-in inside embedded browsers on some accounts/networks: use the default browser instead.
+    if (error && error.message === 'GOOGLE_BLOCKED') email = await sync.signIn({});
+    else throw error;
+  }
   sync.pushMany(history).catch(() => {});
   return email;
 });

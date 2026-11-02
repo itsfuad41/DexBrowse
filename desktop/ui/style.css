@@ -236,3 +236,8 @@ body.locked #views, body.locked #bmbar { visibility: hidden; }
 #bmbar .chip.drag { opacity: .4; }
 #bmbar .chip.over { box-shadow: inset 2px 0 0 var(--accent); }
 .tab.sleeping { opacity: .55; }
+
+#gbar { display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: var(--field); border-top: 1px solid var(--warn); }
+#gbar[hidden] { display: none; }
+#gbar span { flex: 1; }
+#gbar button:not(.icon) { border: 1px solid var(--accent); padding: 5px 12px; border-radius: 8px; }

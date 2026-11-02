@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('dex', {
   bookmarksUpdate: call('bookmarks:update'),
   bookmarksReorder: call('bookmarks:reorder'),
   suggest: call('suggest:query'),
+  openExternal: call('external:open'),
   loginsList: call('logins:list'),
   loginsSave: call('logins:save'),
   loginsAccounts: call('logins:accounts'),

@@ -40,6 +40,7 @@ let libTab = 'history';
 let pendingSave = null;
 let settingsOpen = false;
 let lockEnabled = false;
+let googleBlockedUrl = '';
 
 // ---------- helpers ----------
 function el(tag, props, ...children) {
@@ -133,6 +134,21 @@ async function homeUrl() {
 }
 
 // ---------- tabs ----------
+// Google refuses some embedded browsers: when its error page shows, offer the default browser.
+function checkGoogleBlock(tab) {
+  let host = '';
+  try { host = new URL(tab.url).hostname; } catch (_) { return; }
+  if (!/^accounts\.(google|youtube)\.com$/.test(host) || !tab.view) return;
+  const test = () => {
+    if (!tab.view || !tab.ready) return;
+    tab.view.executeJavaScript('document.body ? document.body.innerText : ""').then((t) => {
+      if (/may not be secure|Couldn.t sign you in/i.test(String(t)) && tab === active) { googleBlockedUrl = tab.url; $('gbar').hidden = false; }
+    }).catch(() => {});
+  };
+  test();
+  setTimeout(test, 1500);
+}
+
 function buildView(tab) {
   const view = document.createElement('webview');
   view.setAttribute('partition', PARTITION);
@@ -155,6 +171,7 @@ function buildView(tab) {
   view.addEventListener('did-start-loading', () => { tab.loading = true; if (tab === active) updateToolbar(); renderTabs(); });
   view.addEventListener('did-stop-loading', () => {
     tab.loading = false;
+    checkGoogleBlock(tab);
     recordVisit(tab);
     if (tab === active) updateToolbar();
     renderTabs();
@@ -242,7 +259,7 @@ function onNavigate(tab, url) {
   tab.url = url;
   tab.failedUrl = null;
   if (isStart(url)) tab.title = 'New tab';
-  if (tab === active) updateToolbar();
+  if (tab === active) { updateToolbar(); if (!/accounts\.(google|youtube)\.com/.test(url)) $('gbar').hidden = true; }
   scheduleSessionSave();
 }
 
@@ -997,6 +1014,9 @@ async function boot() {
   $('updatego').addEventListener('click', () => dex.updateInstall());
   $('updateclose').addEventListener('click', () => { $('updatebar').hidden = true; });
   setIcon('updateclose', 'close');
+  setIcon('gclose', 'close');
+  $('gopen').addEventListener('click', () => { if (googleBlockedUrl) dex.openExternal(googleBlockedUrl); $('gbar').hidden = true; });
+  $('gclose').addEventListener('click', () => { $('gbar').hidden = true; });
   dex.on('lock', async (state) => {
     if (state) { lockEnabled = true; showLock(true); }
     else { const s = await dex.lockStatus(); lockEnabled = !!(s.data && s.data.enabled); showLock(false); }
