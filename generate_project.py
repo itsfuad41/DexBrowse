@@ -74,8 +74,8 @@ android {
         applicationId = "com.fuad.dexbrowse"
         minSdk = 26
         targetSdk = 34
-        versionCode = 34
-        versionName = "2.20.1"
+        versionCode = 35
+        versionName = "2.21.0"
 
         buildConfigField(
             "String",
@@ -712,6 +712,57 @@ class CredentialVault(context: Context, profileId: String = "Default") {
     }
 
     @Synchronized
+    fun upsert(origin: String, username: String, password: String) {
+        require(origin.startsWith("https://") && origin.length > 8) { "Enter a website address" }
+        require(username.isNotBlank()) { "Enter a username" }
+        require(password.isNotBlank()) { "Enter a password" }
+        val entries = entries()
+        entries.put(
+            origin,
+            JSONObject()
+                .put("username", username)
+                .put("password", password)
+        )
+        saveEntries(entries)
+    }
+
+    // reused = same password on several sites, weak = short or too simple
+    @Synchronized
+    fun audit(): Pair<Set<String>, Set<String>> {
+        val entries = entries()
+        val byPassword = HashMap<String, MutableList<String>>()
+        val weak = HashSet<String>()
+        for (origin in entries.keys()) {
+            val p = entries.optJSONObject(origin)?.optString("password").orEmpty()
+            byPassword.getOrPut(p) { mutableListOf() }.add(origin)
+            val kinds = listOf(
+                p.any { it.isLowerCase() },
+                p.any { it.isUpperCase() },
+                p.any { it.isDigit() },
+                p.any { !it.isLetterOrDigit() }
+            ).count { it }
+            if (p.length < 8 || (p.length < 12 && kinds < 3) || kinds < 2) weak.add(origin)
+        }
+        val reused = byPassword.values.filter { it.size > 1 }.flatten().toSet()
+        return Pair(reused, weak)
+    }
+
+    fun generate(): String {
+        val sets = listOf(
+            "abcdefghijkmnopqrstuvwxyz",
+            "ABCDEFGHJKLMNPQRSTUVWXYZ",
+            "23456789",
+            "!@#%^&*-_?"
+        )
+        val all = sets.joinToString("")
+        val random = java.security.SecureRandom()
+        val out = sets.map { it[random.nextInt(it.length)] }.toMutableList()
+        while (out.size < 18) out.add(all[random.nextInt(all.length)])
+        out.shuffle(random)
+        return out.joinToString("")
+    }
+
+    @Synchronized
     fun get(origin: String): Credential? {
         val entry = entries().optJSONObject(origin) ?: return null
         val username = entry.optString("username")
@@ -1314,6 +1365,11 @@ class MainActivity : Activity() {
 
     private val tabs = mutableListOf<Tab>()
     private var activeTab = -1
+    private var splitA: Tab? = null
+    private var splitB: Tab? = null
+    private var splitRatio = 0.5f
+    private var splitWrapA: FrameLayout? = null
+    private var splitWrapB: FrameLayout? = null
     private var browserVisible = false
     private var restoringSession = false
     private var loginMessage: String? = null
@@ -1569,6 +1625,9 @@ document.getElementById('f').onsubmit=function(e){
         }
 
         checkRemoteConfig()
+        if (!guestMode && System.currentTimeMillis() - prefs.getLong("last_update_check", 0L) > 12L * 3600L * 1000L) {
+            handler.postDelayed({ if (!isFinishing) checkForUpdates(false) }, 6000)
+        }
     }
 
     // ---------- small UI helpers ----------
@@ -1968,6 +2027,8 @@ document.getElementById('f').onsubmit=function(e){
         }
         tabs.clear()
         activeTab = -1
+        splitA = null
+        splitB = null
         aiWeb?.let { web ->
             (web.parent as? ViewGroup)?.removeView(web)
             web.destroy()
@@ -2654,7 +2715,62 @@ document.getElementById('f').onsubmit=function(e){
     private fun autoLoginEnabled(): Boolean =
         prefs.getBoolean("autofill_logins", true)
 
+    // offers a generated strong password on sign-up and change-password forms
+    private fun installPasswordSuggest(web: WebView) {
+        if (guestMode || originOf(web.url) == null) return
+        web.evaluateJavascript(
+            """
+            (function(){
+              if(window.__dexPwSuggest)return;
+              window.__dexPwSuggest=true;
+              function gen(){
+                var sets=['abcdefghijkmnopqrstuvwxyz','ABCDEFGHJKLMNPQRSTUVWXYZ','23456789','!@#%^&*-_?'];
+                var all=sets.join('');
+                var a=new Uint32Array(64);crypto.getRandomValues(a);
+                var out=sets.map(function(s,i){return s[a[i]%s.length];});
+                for(var i=4;out.length<18;i++)out.push(all[a[i]%all.length]);
+                for(var j=out.length-1;j>0;j--){var k=a[20+(j%20)]%(j+1);var t=out[j];out[j]=out[k];out[k]=t;}
+                return out.join('');
+              }
+              function isNew(p){
+                if(/new-password/i.test(p.autocomplete||''))return true;
+                var scope=p.form||document;
+                return scope.querySelectorAll('input[type=password]').length>=2;
+              }
+              function setValue(el,v){
+                var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+                d.set.call(el,v);
+                el.dispatchEvent(new Event('input',{bubbles:true}));
+                el.dispatchEvent(new Event('change',{bubbles:true}));
+              }
+              var box=null;
+              function hide(){if(box){box.remove();box=null;}}
+              document.addEventListener('focusin',function(e){
+                var t=e.target;hide();
+                if(!t||t.tagName!=='INPUT'||t.type!=='password'||!isNew(t))return;
+                var pw=gen();var r=t.getBoundingClientRect();
+                box=document.createElement('div');
+                box.style.cssText='position:fixed;z-index:2147483647;left:'+Math.max(4,r.left)+'px;top:'+(r.bottom+4)+'px;background:#fff;color:#111;border:1px solid #cbd5e1;border-radius:8px;padding:8px 12px;font:13px system-ui,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.3)';
+                box.innerHTML='<b>Use a strong password</b><br><span style="font:12px monospace;color:#475569"></span>';
+                box.querySelector('span').textContent=pw;
+                box.addEventListener('pointerdown',function(ev){
+                  ev.preventDefault();
+                  var scope=t.form||document;
+                  scope.querySelectorAll('input[type=password]').forEach(function(p){if(!p.disabled)setValue(p,pw);});
+                  hide();
+                });
+                document.documentElement.appendChild(box);
+              },true);
+              document.addEventListener('focusout',function(){setTimeout(hide,200);},true);
+              window.addEventListener('scroll',hide,true);
+            })();
+            """.trimIndent(),
+            null
+        )
+    }
+
     private fun installLoginObserver(web: WebView) {
+        installPasswordSuggest(web)
         if (!saveLoginsEnabled() || originOf(web.url) == null) return
         web.evaluateJavascript(
             """
@@ -2941,6 +3057,11 @@ document.getElementById('f').onsubmit=function(e){
         )
         web.setOnTouchListener { _, event ->
             scaleDetector.onTouchEvent(event)
+            if (event.action == android.view.MotionEvent.ACTION_DOWN &&
+                splitA != null && current() !== tab && (tab === splitA || tab === splitB)
+            ) {
+                focusSplitPane(tab)
+            }
             false
         }
         tabs.add(tab)
@@ -2968,10 +3089,15 @@ document.getElementById('f').onsubmit=function(e){
         val tab = tabs.removeAt(index)
         (tab.web.parent as? ViewGroup)?.removeView(tab.web)
         tab.web.destroy()
+        if (tab === splitA || tab === splitB) {
+            splitA = null
+            splitB = null
+        }
         if (tabs.isEmpty()) {
+            // like Chrome and Brave: closing the last tab closes the browser
             activeTab = -1
-            addTab()
-            persistSession()
+            prefs.edit().remove("session_tabs").remove("session_scroll_positions").remove("session_active_tab").apply()
+            if (guestMode) finishGuestSession(showLogin = false, closeApp = true) else finishAndRemoveTask()
             return
         }
         if (index < activeTab) activeTab--
@@ -2984,12 +3110,102 @@ document.getElementById('f').onsubmit=function(e){
     private fun showActiveTab() {
         val tab = current() ?: return
         content.removeAllViews()
+        splitWrapA = null
+        splitWrapB = null
         (tab.web.parent as? ViewGroup)?.removeView(tab.web)
-        content.addView(
-            tab.web,
-            FrameLayout.LayoutParams(matchP, matchP)
-        )
+        val a = splitA
+        val b = splitB
+        if (a != null && b != null && (tab === a || tab === b) && tabs.contains(a) && tabs.contains(b)) {
+            showSplit(a, b)
+        } else {
+            content.addView(
+                tab.web,
+                FrameLayout.LayoutParams(matchP, matchP)
+            )
+        }
         address.setText(if (tab.start) "" else tab.lastOnlineUrl ?: tab.web.url ?: "")
+    }
+
+    // ---------- split view: two tabs at once (top/bottom in portrait, side by side in landscape) ----------
+
+    private fun showSplit(a: Tab, b: Tab) {
+        (a.web.parent as? ViewGroup)?.removeView(a.web)
+        (b.web.parent as? ViewGroup)?.removeView(b.web)
+        val landscape = resources.displayMetrics.widthPixels > resources.displayMetrics.heightPixels
+        val box = LinearLayout(this).apply {
+            orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        }
+        val wrapA = FrameLayout(this).apply {
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            addView(a.web, FrameLayout.LayoutParams(matchP, matchP))
+        }
+        val wrapB = FrameLayout(this).apply {
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            addView(b.web, FrameLayout.LayoutParams(matchP, matchP))
+        }
+        val divider = View(this).apply { setBackgroundColor(sky) }
+        val paramsA = if (landscape) LinearLayout.LayoutParams(0, matchP, splitRatio) else LinearLayout.LayoutParams(matchP, 0, splitRatio)
+        val paramsB = if (landscape) LinearLayout.LayoutParams(0, matchP, 1f - splitRatio) else LinearLayout.LayoutParams(matchP, 0, 1f - splitRatio)
+        val paramsD = if (landscape) LinearLayout.LayoutParams(dp(12), matchP) else LinearLayout.LayoutParams(matchP, dp(12))
+        box.addView(wrapA, paramsA)
+        box.addView(divider, paramsD)
+        box.addView(wrapB, paramsB)
+        divider.setOnTouchListener { _, event ->
+            if (event.action == android.view.MotionEvent.ACTION_MOVE || event.action == android.view.MotionEvent.ACTION_DOWN) {
+                val where = IntArray(2)
+                box.getLocationOnScreen(where)
+                val total = if (landscape) box.width else box.height
+                if (total > 0) {
+                    val position = (if (landscape) event.rawX - where[0] else event.rawY - where[1]) / total
+                    splitRatio = position.coerceIn(0.2f, 0.8f)
+                    paramsA.weight = splitRatio
+                    paramsB.weight = 1f - splitRatio
+                    box.requestLayout()
+                }
+            }
+            true
+        }
+        splitWrapA = wrapA
+        splitWrapB = wrapB
+        highlightSplit()
+        content.addView(box, FrameLayout.LayoutParams(matchP, matchP))
+    }
+
+    private fun highlightSplit() {
+        splitWrapA?.setBackgroundColor(if (current() === splitA) sky else Color.TRANSPARENT)
+        splitWrapB?.setBackgroundColor(if (current() === splitB) sky else Color.TRANSPARENT)
+    }
+
+    private fun focusSplitPane(tab: Tab) {
+        val index = tabs.indexOf(tab)
+        if (index < 0 || index == activeTab) return
+        activeTab = index
+        address.setText(if (tab.start) "" else tab.lastOnlineUrl ?: tab.web.url ?: "")
+        highlightSplit()
+        renderTabs()
+        persistSession()
+    }
+
+    private fun toggleSplit() {
+        if (splitA != null) {
+            splitA = null
+            splitB = null
+            showActiveTab()
+            toast("Split view closed")
+            return
+        }
+        val a = current() ?: return
+        var b = tabs.firstOrNull { it !== a }
+        if (b == null) {
+            addTab()
+            b = tabs.lastOrNull { it !== a }
+            activeTab = tabs.indexOf(a)
+        }
+        splitA = a
+        splitB = b
+        showActiveTab()
+        renderTabs()
+        toast("Split view: tap a side to use it, drag the bar to resize")
     }
 
     private fun renderTabs() {
@@ -3081,7 +3297,7 @@ document.getElementById('f').onsubmit=function(e){
                 gravity = Gravity.CENTER_VERTICAL
             }
             val title = TextView(this).apply {
-                text = "${if (index == activeTab) "● " else ""}${tab.title}"
+                text = "${if (index == activeTab) "● " else ""}${if (tab === splitA || tab === splitB) "▥ " else ""}${tab.title}"
                 textSize = 15f
                 setTextColor(foregroundColor)
                 setSingleLine(true)
@@ -3270,6 +3486,21 @@ document.getElementById('f').onsubmit=function(e){
         handler.postDelayed(task, remaining)
     }
 
+    private fun hostOfOrigin(origin: String): String =
+        origin.removePrefix("https://").removePrefix("http://").removePrefix("www.")
+
+    private fun padded(view: View): LinearLayout =
+        LinearLayout(this).apply {
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+            addView(view, LinearLayout.LayoutParams(matchP, wrapC))
+        }
+
+    private fun copyText(label: String, value: String) {
+        (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+            .setPrimaryClip(android.content.ClipData.newPlainText(label, value))
+    }
+
+    // Password manager: search, grouped by site, reused/weak warnings, add, edit, generate
     private fun showSavedLogins() {
         val entries = try {
             credentialVault.origins()
@@ -3277,32 +3508,174 @@ document.getElementById('f').onsubmit=function(e){
             toast("Could not read saved logins: ${error.localizedMessage ?: "storage error"}", true)
             return
         }
-        if (entries.isEmpty()) {
-            dialog().setTitle("Saved website logins").setMessage("No logins saved yet. Sign in to an HTTPS website while automatic login saving is enabled.").setPositiveButton("OK", null).show()
-            return
+        val audit = try {
+            credentialVault.audit()
+        } catch (_: Exception) {
+            Pair(emptySet<String>(), emptySet<String>())
         }
-        val labels = entries.map { "${it.first} — ${it.second}" }.toTypedArray()
+        val reused = audit.first
+        val weak = audit.second
+        val warn = Color.parseColor("#F59E0B")
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val search = field("Search sites and usernames")
+        column.addView(search, LinearLayout.LayoutParams(matchP, wrapC))
+        column.addView(TextView(this).apply {
+            text = "${entries.size} saved" +
+                (if (reused.isNotEmpty()) " · ${reused.size} reused" else "") +
+                (if (weak.isNotEmpty()) " · ${weak.size} weak" else if (entries.isNotEmpty()) " · no weak passwords" else "")
+            textSize = 12f
+            setTextColor(if (reused.isNotEmpty() || weak.isNotEmpty()) warn else muted)
+            setPadding(dp(4), dp(6), dp(4), dp(6))
+        })
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        column.addView(list)
+        val prompt = dialog()
+            .setTitle("Passwords")
+            .setView(android.widget.ScrollView(this).apply { addView(column) })
+            .setPositiveButton("Add password") { _, _ -> editLogin(null) }
+            .setNegativeButton("Close", null)
+            .show()
+
+        fun paint() {
+            list.removeAllViews()
+            val q = search.text.toString().trim().lowercase()
+            val shown = entries
+                .filter { q.isEmpty() || it.first.lowercase().contains(q) || it.second.lowercase().contains(q) }
+                .sortedBy { hostOfOrigin(it.first) }
+            if (shown.isEmpty()) {
+                list.addView(TextView(this).apply {
+                    text = if (entries.isEmpty()) "No saved passwords yet. Sign in to a website or add one here." else "Nothing matches your search."
+                    textSize = 14f
+                    setTextColor(muted)
+                    setPadding(dp(8), dp(12), dp(8), dp(12))
+                })
+                return
+            }
+            for (item in shown) {
+                val origin = item.first
+                val badges = (if (origin in reused) "  ·  Reused" else "") + (if (origin in weak) "  ·  Weak" else "")
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(8), dp(10), dp(8), dp(10))
+                    setOnClickListener {
+                        prompt.dismiss()
+                        showLoginActions(origin)
+                    }
+                }
+                row.addView(TextView(this).apply {
+                    text = hostOfOrigin(origin)
+                    textSize = 15f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(foregroundColor)
+                    setSingleLine(true)
+                })
+                row.addView(TextView(this).apply {
+                    text = item.second.ifBlank { "(no username)" } + badges
+                    textSize = 13f
+                    setTextColor(if (badges.isNotEmpty()) warn else muted)
+                    setSingleLine(true)
+                })
+                list.addView(row, LinearLayout.LayoutParams(matchP, wrapC))
+            }
+        }
+        search.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                paint()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+        paint()
+    }
+
+    private fun showLoginActions(origin: String) {
+        val cred = try {
+            credentialVault.get(origin)
+        } catch (_: Exception) {
+            null
+        }
         dialog()
-            .setTitle("Saved website logins")
-            .setItems(labels) { _, index ->
-                val origin = entries[index].first
-                dialog()
-                    .setTitle(origin)
-                    .setItems(arrayOf("Fill login on this page", "Remove saved login")) { _, action ->
-                        if (action == 0) {
-                            fillSavedLogin(origin)
-                        } else {
+            .setTitle(hostOfOrigin(origin))
+            .setItems(arrayOf("Show password", "Copy password", "Fill on this page", "Edit", "Delete")) { _, action ->
+                when (action) {
+                    0 -> dialog()
+                        .setTitle(cred?.username ?: origin)
+                        .setMessage(cred?.password ?: "Could not read this password")
+                        .setPositiveButton("OK") { _, _ -> showSavedLogins() }
+                        .show()
+                    1 -> {
+                        if (cred != null) {
+                            copyText("password", cred.password)
+                            toast("Password copied")
+                        }
+                        showSavedLogins()
+                    }
+                    2 -> fillSavedLogin(origin)
+                    3 -> editLogin(origin)
+                    else -> dialog()
+                        .setTitle("Delete saved password?")
+                        .setMessage(hostOfOrigin(origin))
+                        .setPositiveButton("Delete") { _, _ ->
                             try {
                                 credentialVault.remove(origin)
                                 toast("Saved login removed")
                             } catch (error: Exception) {
                                 toast("Could not remove login: ${error.localizedMessage ?: "storage error"}", true)
                             }
+                            showSavedLogins()
                         }
-                    }
-                    .show()
+                        .setNegativeButton("Cancel") { _, _ -> showSavedLogins() }
+                        .show()
+                }
             }
-            .setNegativeButton("Close", null)
+            .setNegativeButton("Back") { _, _ -> showSavedLogins() }
+            .show()
+    }
+
+    private fun editLogin(origin: String?) {
+        val existing = origin?.let {
+            try {
+                credentialVault.get(it)
+            } catch (_: Exception) {
+                null
+            }
+        }
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        val site = field("Website (example.com)")
+        site.setText(origin?.let { hostOfOrigin(it) } ?: "")
+        site.isEnabled = origin == null
+        val user = field("Username or email")
+        user.setText(existing?.username ?: "")
+        val pass = field("Password")
+        pass.setText(existing?.password ?: "")
+        val generate = chip("Generate strong password", panel, border) {
+            pass.setText(credentialVault.generate())
+        }
+        column.addView(site, LinearLayout.LayoutParams(matchP, wrapC))
+        column.addView(user, LinearLayout.LayoutParams(matchP, wrapC))
+        column.addView(pass, LinearLayout.LayoutParams(matchP, wrapC))
+        column.addView(generate, LinearLayout.LayoutParams(matchP, wrapC).apply { topMargin = dp(12) })
+        dialog()
+            .setTitle(if (origin == null) "Add password" else "Edit password")
+            .setView(column)
+            .setPositiveButton("Save") { _, _ ->
+                val host = site.text.toString().trim().removePrefix("https://").removePrefix("http://").substringBefore('/')
+                val target = origin ?: ("https://" + host)
+                try {
+                    credentialVault.upsert(target, user.text.toString().trim(), pass.text.toString())
+                    toast("Password saved")
+                } catch (error: Exception) {
+                    toast("Could not save: ${error.localizedMessage ?: "storage error"}", true)
+                }
+                showSavedLogins()
+            }
+            .setNegativeButton("Cancel") { _, _ -> showSavedLogins() }
             .show()
     }
 
@@ -3331,6 +3704,53 @@ document.getElementById('f').onsubmit=function(e){
         }
     }
 
+    private fun saveBookmarkEntries(list: org.json.JSONArray) {
+        prefs.edit().putString("bookmarks", list.toString()).apply()
+    }
+
+    private fun bookmarkFolders(): org.json.JSONArray =
+        try {
+            org.json.JSONArray(prefs.getString("bookmark_folders", "[]") ?: "[]")
+        } catch (_: org.json.JSONException) {
+            org.json.JSONArray()
+        }
+
+    private fun saveBookmarkFolders(list: org.json.JSONArray) {
+        prefs.edit().putString("bookmark_folders", list.toString()).apply()
+    }
+
+    // first entry (empty id) is the bookmarks bar, like Brave
+    private fun folderChoices(): List<Pair<String, String>> {
+        val out = mutableListOf(Pair("", "Bookmarks bar"))
+        val folders = bookmarkFolders()
+        for (index in 0 until folders.length()) {
+            val folder = folders.optJSONObject(index) ?: continue
+            out.add(Pair(folder.optString("id"), folder.optString("name")))
+        }
+        return out
+    }
+
+    private fun promptNewFolder(done: (String) -> Unit) {
+        val name = field("Folder name")
+        dialog()
+            .setTitle("New folder")
+            .setView(padded(name))
+            .setPositiveButton("Save") { _, _ ->
+                val text = name.text.toString().trim().take(100)
+                if (text.isEmpty()) {
+                    toast("Enter a folder name")
+                } else {
+                    val folders = bookmarkFolders()
+                    val id = java.util.UUID.randomUUID().toString()
+                    folders.put(JSONObject().put("id", id).put("name", text))
+                    saveBookmarkFolders(folders)
+                    done(id)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun addCurrentBookmark() {
         val tab = current() ?: return
         val url = tab.lastOnlineUrl ?: tab.web.url
@@ -3338,19 +3758,75 @@ document.getElementById('f').onsubmit=function(e){
             toast("Open a website before adding a bookmark")
             return
         }
-        val saved = org.json.JSONArray()
         val existing = bookmarkEntries()
+        var found = false
         for (index in 0 until existing.length()) {
-            val entry = existing.optJSONObject(index) ?: continue
-            if (entry.optString("url") != url) saved.put(entry)
+            if (existing.optJSONObject(index)?.optString("url") == url) found = true
         }
-        saved.put(
-            JSONObject()
-                .put("title", tab.title.ifBlank { url })
-                .put("url", url)
+        if (!found) {
+            existing.put(
+                JSONObject()
+                    .put("title", tab.title.ifBlank { url })
+                    .put("url", url)
+            )
+            saveBookmarkEntries(existing)
+        }
+        showBookmarkPopup(url, !found)
+    }
+
+    // like Brave's "Bookmark added" popup: name, folder, remove
+    private fun showBookmarkPopup(url: String, added: Boolean) {
+        val list = bookmarkEntries()
+        var position = -1
+        for (index in 0 until list.length()) {
+            if (list.optJSONObject(index)?.optString("url") == url) position = index
+        }
+        if (position < 0) return
+        val entry = list.getJSONObject(position)
+        val name = field("Name")
+        name.setText(entry.optString("title"))
+        val choices = folderChoices()
+        val folder = android.widget.Spinner(this)
+        folder.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            choices.map { it.second }
         )
-        prefs.edit().putString("bookmarks", saved.toString()).apply()
-        toast("Bookmark saved")
+        folder.setSelection(choices.indexOfFirst { it.first == entry.optString("folder") }.coerceAtLeast(0))
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        column.addView(name, LinearLayout.LayoutParams(matchP, wrapC))
+        column.addView(TextView(this).apply {
+            text = "Folder"
+            textSize = 12f
+            setTextColor(muted)
+            setPadding(0, dp(12), 0, 0)
+        })
+        column.addView(folder, LinearLayout.LayoutParams(matchP, wrapC))
+        dialog()
+            .setTitle(if (added) "Bookmark added" else "Edit bookmark")
+            .setView(column)
+            .setPositiveButton("Done") { _, _ ->
+                entry.put("title", name.text.toString().ifBlank { url })
+                val chosen = choices[folder.selectedItemPosition.coerceIn(0, choices.lastIndex)].first
+                if (chosen.isEmpty()) entry.remove("folder") else entry.put("folder", chosen)
+                saveBookmarkEntries(list)
+            }
+            .setNegativeButton("Remove") { _, _ ->
+                removeBookmark(url)
+                toast("Bookmark removed")
+            }
+            .setNeutralButton("New folder") { _, _ ->
+                promptNewFolder { id ->
+                    entry.put("title", name.text.toString().ifBlank { url })
+                    entry.put("folder", id)
+                    saveBookmarkEntries(list)
+                    toast("Moved to the new folder")
+                }
+            }
+            .show()
     }
 
     private fun removeBookmark(url: String) {
@@ -3360,11 +3836,55 @@ document.getElementById('f').onsubmit=function(e){
             val entry = existing.optJSONObject(index) ?: continue
             if (entry.optString("url") != url) saved.put(entry)
         }
-        prefs.edit().putString("bookmarks", saved.toString()).apply()
+        saveBookmarkEntries(saved)
+    }
+
+    private fun bookmarkAllTabs() {
+        val pages = tabs.mapNotNull { tab ->
+            val url = tab.lastOnlineUrl ?: tab.web.url
+            if (url != null && (url.startsWith("https://") || url.startsWith("http://"))) Pair(tab.title.ifBlank { url }, url) else null
+        }
+        if (pages.isEmpty()) {
+            toast("No web pages open")
+            return
+        }
+        val folders = bookmarkFolders()
+        val id = java.util.UUID.randomUUID().toString()
+        folders.put(JSONObject().put("id", id).put("name", "Saved tabs " + java.text.DateFormat.getDateInstance().format(java.util.Date())))
+        saveBookmarkFolders(folders)
+        val entries = bookmarkEntries()
+        for (page in pages) {
+            entries.put(JSONObject().put("title", page.first).put("url", page.second).put("folder", id))
+        }
+        saveBookmarkEntries(entries)
+        toast("Saved ${pages.size} tabs to a new folder")
+    }
+
+    private fun showBookmarkActions(entry: JSONObject) {
+        val url = entry.optString("url")
+        dialog()
+            .setTitle(entry.optString("title").ifBlank { url })
+            .setItems(arrayOf("Open in new tab", "Edit", "Copy link address", "Delete")) { _, action ->
+                when (action) {
+                    0 -> addTab(url)
+                    1 -> showBookmarkPopup(url, false)
+                    2 -> {
+                        copyText("link", url)
+                        toast("Link copied")
+                    }
+                    else -> {
+                        removeBookmark(url)
+                        showBookmarks()
+                    }
+                }
+            }
+            .setNegativeButton("Back") { _, _ -> showBookmarks() }
+            .show()
     }
 
     private fun showBookmarks() {
         val entries = bookmarkEntries()
+        val folders = bookmarkFolders()
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(8), dp(16), dp(8))
@@ -3372,7 +3892,7 @@ document.getElementById('f').onsubmit=function(e){
         val scroller = android.widget.ScrollView(this).apply {
             addView(list)
         }
-        if (entries.length() == 0) {
+        if (entries.length() == 0 && folders.length() == 0) {
             list.addView(TextView(this).apply {
                 text = "No bookmarks yet. Open a page and choose “Bookmark this page”."
                 textSize = 14f
@@ -3383,44 +3903,146 @@ document.getElementById('f').onsubmit=function(e){
         val prompt = dialog()
             .setTitle("Bookmarks")
             .setView(scroller)
-            .setPositiveButton("Bookmark current page") { _, _ -> addCurrentBookmark() }
+            .setPositiveButton("Add page") { _, _ -> addCurrentBookmark() }
+            .setNeutralButton("More…") { _, _ ->
+                dialog()
+                    .setItems(arrayOf("New folder", "Bookmark all tabs")) { _, action ->
+                        if (action == 0) promptNewFolder { showBookmarks() } else {
+                            bookmarkAllTabs()
+                            showBookmarks()
+                        }
+                    }
+                    .setNegativeButton("Back") { _, _ -> showBookmarks() }
+                    .show()
+            }
             .setNegativeButton("Close", null)
             .show()
 
-        for (index in 0 until entries.length()) {
-            val entry = entries.optJSONObject(index) ?: continue
-            val titleText = entry.optString("title").ifBlank { entry.optString("url") }
-            val url = entry.optString("url")
-            if (!url.startsWith("https://") && !url.startsWith("http://")) continue
-            val row = LinearLayout(this).apply {
+        fun section(title: String, folderId: String, folderName: String?) {
+            val inFolder = mutableListOf<JSONObject>()
+            for (index in 0 until entries.length()) {
+                val entry = entries.optJSONObject(index) ?: continue
+                val url = entry.optString("url")
+                if (!url.startsWith("https://") && !url.startsWith("http://")) continue
+                if (entry.optString("folder") == folderId) inFolder.add(entry)
+            }
+            if (folderId.isEmpty() && inFolder.isEmpty() && folders.length() > 0) return
+            val head = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(10), 0, dp(2))
             }
-            row.addView(TextView(this).apply {
-                text = titleText
-                textSize = 15f
-                setTextColor(foregroundColor)
-                setSingleLine(true)
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                setPadding(dp(8), dp(12), dp(8), dp(12))
-                setOnClickListener {
-                    navigate(url)
-                    prompt.dismiss()
-                }
-            }, LinearLayout.LayoutParams(0, wrapC, 1f))
-            row.addView(TextView(this).apply {
-                text = "×"
-                textSize = 22f
+            head.addView(TextView(this).apply {
+                text = title
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
                 setTextColor(muted)
-                setContentDescription("Remove bookmark")
-                setPadding(dp(16), dp(8), dp(8), dp(8))
-                setOnClickListener {
-                    removeBookmark(url)
-                    prompt.dismiss()
-                    showBookmarks()
+            }, LinearLayout.LayoutParams(0, wrapC, 1f))
+            if (folderName != null) {
+                head.addView(TextView(this).apply {
+                    text = "✎"
+                    textSize = 18f
+                    setTextColor(muted)
+                    setPadding(dp(12), dp(4), dp(12), dp(4))
+                    setOnClickListener {
+                        val nameField = field("Folder name")
+                        nameField.setText(folderName)
+                        dialog()
+                            .setTitle("Rename folder")
+                            .setView(padded(nameField))
+                            .setPositiveButton("Save") { _, _ ->
+                                val updated = bookmarkFolders()
+                                for (index in 0 until updated.length()) {
+                                    val folder = updated.optJSONObject(index) ?: continue
+                                    if (folder.optString("id") == folderId && nameField.text.toString().isNotBlank()) {
+                                        folder.put("name", nameField.text.toString().trim().take(100))
+                                    }
+                                }
+                                saveBookmarkFolders(updated)
+                                prompt.dismiss()
+                                showBookmarks()
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .show()
+                    }
+                })
+                head.addView(TextView(this).apply {
+                    text = "✕"
+                    textSize = 16f
+                    setTextColor(muted)
+                    setPadding(dp(12), dp(4), dp(4), dp(4))
+                    setOnClickListener {
+                        dialog()
+                            .setTitle("Delete folder?")
+                            .setMessage("The folder and its ${inFolder.size} bookmarks will be removed.")
+                            .setPositiveButton("Delete") { _, _ ->
+                                val keptFolders = org.json.JSONArray()
+                                val current = bookmarkFolders()
+                                for (index in 0 until current.length()) {
+                                    val folder = current.optJSONObject(index) ?: continue
+                                    if (folder.optString("id") != folderId) keptFolders.put(folder)
+                                }
+                                saveBookmarkFolders(keptFolders)
+                                val keptEntries = org.json.JSONArray()
+                                val all = bookmarkEntries()
+                                for (index in 0 until all.length()) {
+                                    val entry = all.optJSONObject(index) ?: continue
+                                    if (entry.optString("folder") != folderId) keptEntries.put(entry)
+                                }
+                                saveBookmarkEntries(keptEntries)
+                                prompt.dismiss()
+                                showBookmarks()
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .show()
+                    }
+                })
+            }
+            list.addView(head, LinearLayout.LayoutParams(matchP, wrapC))
+            if (inFolder.isEmpty()) {
+                list.addView(TextView(this).apply {
+                    text = "Empty"
+                    textSize = 13f
+                    setTextColor(muted)
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                })
+            }
+            for (entry in inFolder) {
+                val url = entry.optString("url")
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
                 }
-            })
-            list.addView(row, LinearLayout.LayoutParams(matchP, wrapC))
+                row.addView(TextView(this).apply {
+                    text = entry.optString("title").ifBlank { url }
+                    textSize = 15f
+                    setTextColor(foregroundColor)
+                    setSingleLine(true)
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(8), dp(12), dp(8), dp(12))
+                    setOnClickListener {
+                        navigate(url)
+                        prompt.dismiss()
+                    }
+                }, LinearLayout.LayoutParams(0, wrapC, 1f))
+                row.addView(TextView(this).apply {
+                    text = "⋮"
+                    textSize = 22f
+                    setTextColor(muted)
+                    setContentDescription("Bookmark options")
+                    setPadding(dp(16), dp(8), dp(8), dp(8))
+                    setOnClickListener {
+                        prompt.dismiss()
+                        showBookmarkActions(entry)
+                    }
+                })
+                list.addView(row, LinearLayout.LayoutParams(matchP, wrapC))
+            }
+        }
+        section("Bookmarks bar", "", null)
+        for (index in 0 until folders.length()) {
+            val folder = folders.optJSONObject(index) ?: continue
+            section("📁 " + folder.optString("name"), folder.optString("id"), folder.optString("name"))
         }
     }
 
@@ -3467,7 +4089,8 @@ document.getElementById('f').onsubmit=function(e){
                 "Bookmarks",
                 "Bookmark this page",
                 "Extensions",
-                "Exit guest browser"
+                "Exit guest browser",
+                if (splitA != null) "Exit split view" else "Split view"
             )
         } else arrayOf(
             "Home",
@@ -3483,7 +4106,7 @@ document.getElementById('f').onsubmit=function(e){
             "Auto-lock timer",
             "Save website logins automatically: " + if (saveLoginsEnabled()) "ON" else "OFF",
             "Automatically sign in with saved logins: " + if (autoLoginEnabled()) "ON" else "OFF",
-            "Manage saved logins",
+            "Passwords",
             "Lock browser",
             "Manage current profile",
             "Add profile",
@@ -3494,7 +4117,10 @@ document.getElementById('f').onsubmit=function(e){
             "Bookmarks",
             "Bookmark this page",
             "Extensions",
-            "Google sync: " + if (sync.isSignedIn()) sync.email() else "Sign in"
+            "Google sync: " + if (sync.isSignedIn()) sync.email() else "Sign in",
+            if (splitA != null) "Exit split view" else "Split view",
+            "Bookmark all tabs",
+            "Check for updates"
         )
 
         dialog()
@@ -3511,6 +4137,7 @@ document.getElementById('f').onsubmit=function(e){
                         6 -> addCurrentBookmark()
                         7 -> showExtensionsInfo()
                         8 -> finishGuestSession(showLogin = false, closeApp = true)
+                        9 -> toggleSplit()
                     }
                 } else when (index) {
                     0 -> loadHome()
@@ -3538,6 +4165,9 @@ document.getElementById('f').onsubmit=function(e){
                     22 -> addCurrentBookmark()
                     23 -> showExtensionsInfo()
                     24 -> showSyncMenu()
+                    25 -> toggleSplit()
+                    26 -> bookmarkAllTabs()
+                    27 -> checkForUpdates(true)
                 }
             }
             .show()
@@ -3869,18 +4499,161 @@ document.getElementById('f').onsubmit=function(e){
     }
 
     private fun showAbout() {
+        val mail = "itsfuad.41@outlook.com"
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        column.addView(TextView(this).apply {
+            text = "DexBrowse By Fuad"
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(foregroundColor)
+        })
+        column.addView(TextView(this).apply {
+            text = "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\nAndroid desktop browser"
+            textSize = 13f
+            setTextColor(muted)
+            setPadding(0, dp(2), 0, dp(14))
+        })
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = shape(panel, border, 16)
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+        }
+        card.addView(TextView(this).apply {
+            text = "Md. Fuad Hasan"
+            textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(foregroundColor)
+        })
+        card.addView(TextView(this).apply {
+            text = "Get in touch"
+            textSize = 12f
+            setTextColor(muted)
+            setPadding(0, dp(10), 0, dp(6))
+        })
+        val mailRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fun sendMail(subject: String) {
+            try {
+                startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + mail + subject)))
+            } catch (_: Exception) {
+                toast("No email app found")
+            }
+        }
+        mailRow.addView(TextView(this).apply {
+            text = "✉  " + mail
+            textSize = 15f
+            setTextColor(sky)
+            setOnClickListener { sendMail("") }
+        }, LinearLayout.LayoutParams(0, wrapC, 1f))
+        fun iconButton(symbol: String, description: String, onClick: () -> Unit): TextView =
+            TextView(this).apply {
+                text = symbol
+                textSize = 17f
+                gravity = Gravity.CENTER
+                setTextColor(foregroundColor)
+                background = shape(navBg, border, 10)
+                setContentDescription(description)
+                setOnClickListener { onClick() }
+            }
+        mailRow.addView(
+            iconButton("👤", "Copy email address") {
+                copyText("email", mail)
+                toast("Email copied")
+            },
+            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(8) }
+        )
+        mailRow.addView(
+            iconButton("💬", "Send a message") { sendMail("?subject=DexBrowse") },
+            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(8) }
+        )
+        card.addView(mailRow)
+        column.addView(card, LinearLayout.LayoutParams(matchP, wrapC))
+        column.addView(TextView(this).apply {
+            text = "Made By Fuad"
+            textSize = 13f
+            setTextColor(muted)
+            background = shape(panel, border, 40)
+            setPadding(dp(16), dp(6), dp(16), dp(6))
+        }, LinearLayout.LayoutParams(wrapC, wrapC).apply {
+            topMargin = dp(10)
+            marginStart = dp(6)
+        })
         dialog()
             .setTitle("About DexBrowse")
-            .setMessage(
-                "DexBrowse\n\n" +
-                    "Version: ${BuildConfig.VERSION_NAME}\n" +
-                    "Version Code: ${BuildConfig.VERSION_CODE}\n\n" +
-                    "Developer: Md. Fuad Hasan\n" +
-                    "Brand: DexBrowse By Fuad\n\n" +
-                    "Android Desktop Browser"
-            )
-            .setPositiveButton("OK", null)
+            .setView(android.widget.ScrollView(this).apply { addView(column) })
+            .setPositiveButton("Check for updates") { _, _ -> checkForUpdates(true) }
+            .setNegativeButton("Close", null)
             .show()
+    }
+
+    // ---------- updates (GitHub releases) ----------
+
+    private fun versionNewer(candidate: String, installed: String): Boolean {
+        val a = candidate.split(".").map { it.toIntOrNull() ?: 0 }
+        val b = installed.split(".").map { it.toIntOrNull() ?: 0 }
+        for (index in 0 until maxOf(a.size, b.size)) {
+            val x = a.getOrElse(index) { 0 }
+            val y = b.getOrElse(index) { 0 }
+            if (x != y) return x > y
+        }
+        return false
+    }
+
+    private fun checkForUpdates(manual: Boolean) {
+        prefs.edit().putLong("last_update_check", System.currentTimeMillis()).apply()
+        executor.execute {
+            try {
+                val connection = URL("https://api.github.com/repos/itsfuad41/DexBrowse/releases/latest")
+                    .openConnection()
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+                connection.setRequestProperty("Accept", "application/vnd.github+json")
+                val json = JSONObject(
+                    connection.getInputStream().bufferedReader().use { it.readText() }
+                )
+                val tag = json.optString("tag_name").removePrefix("v")
+                var apk = ""
+                val assets = json.optJSONArray("assets")
+                if (assets != null) {
+                    for (index in 0 until assets.length()) {
+                        val asset = assets.optJSONObject(index) ?: continue
+                        if (asset.optString("name").endsWith(".apk")) apk = asset.optString("browser_download_url")
+                    }
+                }
+                val newer = tag.isNotEmpty() && versionNewer(tag, BuildConfig.VERSION_NAME)
+                handler.post {
+                    if (isFinishing) return@post
+                    if (!newer) {
+                        if (manual) toast("You have the latest version (${BuildConfig.VERSION_NAME})")
+                        return@post
+                    }
+                    dialog()
+                        .setTitle("Update available")
+                        .setMessage("DexBrowse $tag is available. You have ${BuildConfig.VERSION_NAME}.\n\nDownload it, then open the downloaded file to install.")
+                        .setPositiveButton("Download") { _, _ ->
+                            try {
+                                startActivity(
+                                    Intent(
+                                        Intent.ACTION_VIEW,
+                                        Uri.parse(if (apk.isNotEmpty()) apk else "https://github.com/itsfuad41/DexBrowse/releases/latest")
+                                    )
+                                )
+                            } catch (_: Exception) {
+                                toast("Could not open the download link", true)
+                            }
+                        }
+                        .setNegativeButton("Later", null)
+                        .show()
+                }
+            } catch (_: Exception) {
+                handler.post { if (manual) toast("Could not check for updates", true) }
+            }
+        }
     }
 
     // ---------- remote config / kill switch ----------

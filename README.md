@@ -147,3 +147,6 @@ Push a tag such as `v2.14.0` to build and publish both the APK and the PC instal
 - Closing the last tab closes the window (like Chrome/Brave).
 - Guest browser no longer shows an error box when Windows holds cache files at exit.
 - Task Manager description is now just "DexBrowse".
+
+### 2.21.0 (Android)
+Brought the PC features to the Android app: Brave-style bookmarks with folders and a "Bookmark added" popup, a password manager (search, add/edit, generator, reused/weak warnings, strong-password suggestion on sign-up forms), a developer card in About, update check against GitHub releases, split view, and closing the last tab closes the browser.
