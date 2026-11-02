@@ -137,3 +137,8 @@ Push a tag such as `v2.14.0` to build and publish both the APK and the PC instal
 - **Password manager**: search, grouped by site, add/edit entries, built-in password generator, "Reused" and "Weak" warnings. Forms with a new-password field offer a strong generated password and a "Manage passwords" link.
 - **About**: developer contact card.
 - **Auto-update**: updater log (About → Update log), update bar shown in windows opened after the download, and other DexBrowse processes are closed before the installer runs.
+
+### 2.20.0 (PC)
+- **Bookmarks like Brave**: "Bookmark added" popup under the star (name, folder, remove), folders on the bookmarks bar, "Other bookmarks", dropdowns, Add page / Add folder, Open in new window / private window, bookmark manager with folders, Bookmark all tabs, Export to HTML.
+- **Browser-style title bar**: tabs sit in the title bar; no separate title row above them.
+- **Switching profile**: the profile you left is locked, all its tabs are put to sleep and its window is minimized, not closed.

@@ -112,46 +112,140 @@ function updateBarVisibility() {
   $('bmbar').hidden = !bookmarkBarVisible();
 }
 
+const barOf = (b) => (b.folder || 'bar');
+const folderOptions = () => [['bar', 'Bookmarks bar'], ['other', 'Other bookmarks'], ...bmFolders.map((f) => [f.id, (f.parent === 'other' ? 'Other bookmarks / ' : 'Bookmarks bar / ') + f.name])];
+function folderSelect(sel, value) {
+  sel.replaceChildren(...folderOptions().map(([v, label]) => el('option', { value: v, selected: v === value }, label)));
+}
+async function reloadBookmarks(r) {
+  if (!r.ok) { toast(r.error); return false; }
+  if (Array.isArray(r.data)) bookmarks = r.data;
+  renderBookmarkBar();
+  updateToolbar();
+  return true;
+}
+// add or edit a bookmark in the same dialog (b === null adds a page by address)
 function editBookmark(b) {
   const dlg = $('editdlg');
-  $('ed-title').value = b.title;
-  $('ed-url').value = b.url;
+  $('ed-title').value = b ? b.title : '';
+  $('ed-url').value = b ? b.url : '';
+  folderSelect($('ed-folder'), b ? barOf(b) : 'bar');
+  dlg.querySelector('b').textContent = b ? 'Edit bookmark' : 'Add page';
   dlg.hidden = false;
+  dlg.dataset.id = b ? b.id : '';
   $('ed-title').focus();
-  dlg.dataset.id = b.id;
 }
 async function saveBookmarkEdit() {
   const dlg = $('editdlg');
-  const r = await dex.bookmarksUpdate(dlg.dataset.id, { title: $('ed-title').value, url: $('ed-url').value.trim() });
+  const folder = $('ed-folder').value;
+  let r;
+  if (dlg.dataset.id) r = await dex.bookmarksUpdate(dlg.dataset.id, { title: $('ed-title').value, url: $('ed-url').value.trim(), folder });
+  else {
+    const url = $('ed-url').value.trim();
+    r = await dex.bookmarksAdd({ title: $('ed-title').value.trim() || url, url });
+    if (r.ok) { const made = r.data.find((x) => x.url === url); if (made && folder !== 'bar') r = await dex.bookmarksUpdate(made.id, { folder }); }
+  }
   dlg.hidden = true;
-  if (r.ok) { bookmarks = r.data; renderBookmarkBar(); } else toast(r.error);
+  await reloadBookmarks(r);
+}
+// the small popup under the star (Brave: "Bookmark added")
+function showBookmarkPopup(b, added) {
+  closePops();
+  const pop = $('bmpop');
+  const name = el('input', { type: 'text', value: b.title, spellcheck: false });
+  const folder = el('select');
+  folderSelect(folder, barOf(b));
+  const newFolder = el('button', { onclick: () => promptFolder('bar', async (id) => { const r = await dex.bmFolders(); bmFolders = r.data || bmFolders; folderSelect(folder, id); }) }, 'New folder…');
+  const close = () => { pop.hidden = true; };
+  pop.replaceChildren(
+    el('h4', {}, added ? 'Bookmark added' : 'Edit bookmark'),
+    el('label', {}, 'Name', name),
+    el('label', {}, 'Folder', folder),
+    el('div', { className: 'row' },
+      el('button', { onclick: async () => { close(); await reloadBookmarks(await dex.bookmarksRemove(b.id)); } }, 'Remove'),
+      newFolder,
+      el('button', { className: 'primary', onclick: async () => { close(); await reloadBookmarks(await dex.bookmarksUpdate(b.id, { title: name.value, folder: folder.value })); } }, 'Done')));
+  pop.hidden = false;
+  name.focus();
+  name.select();
+}
+function promptFolder(parent, done, rename) {
+  closePops();
+  const pop = $('bmpop');
+  const name = el('input', { type: 'text', value: rename ? rename.name : '', placeholder: 'Folder name', spellcheck: false });
+  const go = async () => {
+    pop.hidden = true;
+    if (rename) { const r = await dex.bmFolderRename(rename.id, name.value); if (r.ok) { bmFolders = r.data; renderBookmarkBar(); if (done) done(); } else toast(r.error); return; }
+    const r = await dex.bmFolderAdd({ name: name.value, parent });
+    if (r.ok) { bmFolders = r.data.folders; renderBookmarkBar(); if (done) done(r.data.id); } else toast(r.error);
+  };
+  name.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') go(); if (ev.key === 'Escape') pop.hidden = true; });
+  pop.replaceChildren(el('h4', {}, rename ? 'Rename folder' : 'New folder'), el('label', {}, 'Name', name),
+    el('div', { className: 'row' }, el('button', { onclick: () => { pop.hidden = true; } }, 'Cancel'), el('button', { className: 'primary', onclick: go }, 'Save')));
+  pop.hidden = false;
+  name.focus();
+}
+function placeMenu(box, x, y) {
+  box.style.left = Math.max(4, Math.min(x, innerWidth - 230)) + 'px';
+  box.style.top = Math.min(y, innerHeight - 320) + 'px';
+  box.hidden = false;
+}
+function barToggleItems(add) {
+  add(cfg.settings.bookmarksBarMode === 'always' ? 'Show bookmarks bar only on new tab page' : 'Always show bookmarks bar', () => dex.settingsSet({ bookmarksBarMode: cfg.settings.bookmarksBarMode === 'always' ? 'newtab' : 'always' }));
+  add('Hide bookmarks bar', () => dex.settingsSet({ bookmarksBar: false }));
 }
 function bookmarkMenu(b, x, y) {
   closePops();
   const box = $('ctx');
   box.replaceChildren();
   const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
-  add('Open', () => go(b.url));
   add('Open in new tab', () => createTab(b.url));
-  add('Edit…', () => editBookmark(b));
-  add('Delete', async () => { const r = await dex.bookmarksRemove(b.id); if (r.ok) { bookmarks = r.data; renderBookmarkBar(); updateToolbar(); } });
+  add('Open in new window', () => dex.windowNew(false));
+  add('Open in new private window', () => dex.windowNew(true));
   box.append(el('hr'));
-  add(cfg.settings.bookmarksBarMode === 'always' ? 'Show bar only on new tab page' : 'Always show bookmarks bar', () => dex.settingsSet({ bookmarksBarMode: cfg.settings.bookmarksBarMode === 'always' ? 'newtab' : 'always' }));
-  add('Hide bookmarks bar', () => dex.settingsSet({ bookmarksBar: false }));
-  box.style.left = Math.min(x, innerWidth - 210) + 'px';
-  box.style.top = Math.min(y, innerHeight - 220) + 'px';
-  box.hidden = false;
+  add('Edit…', () => editBookmark(b));
+  add('Copy link address', () => { navigator.clipboard.writeText(b.url).catch(() => {}); toast('Link copied'); });
+  add('Delete', async () => reloadBookmarks(await dex.bookmarksRemove(b.id)));
+  box.append(el('hr'));
+  add('Add page…', () => editBookmark(null));
+  add('Add folder…', () => promptFolder('bar'));
+  add('Bookmark manager', () => showLibrary('bookmarks'));
+  box.append(el('hr'));
+  barToggleItems(add);
+  placeMenu(box, x, y);
 }
-function allBookmarksMenu(anchor) {
+function folderMenu(f, x, y) {
   closePops();
   const box = $('ctx');
-  box.replaceChildren(...bookmarks.map((b) => el('button', { onclick: () => { closePops(); go(b.url); } }, b.title)));
+  box.replaceChildren();
+  const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
+  const kids = bookmarks.filter((b) => b.folder === f.id);
+  add('Open all (' + kids.length + ')', () => kids.forEach((k) => createTab(k.url, false)));
+  add('Rename…', () => promptFolder(f.parent, null, f));
+  add('Delete', async () => { const r = await dex.bmFolderRemove(f.id); if (r.ok) { bmFolders = r.data.folders; bookmarks = r.data.bookmarks; renderBookmarkBar(); updateToolbar(); } });
+  box.append(el('hr'));
+  add('Add page…', () => editBookmark(null));
+  add('Add folder…', () => promptFolder('bar'));
+  placeMenu(box, x, y);
+}
+// dropdown for a folder (or "Other bookmarks") under its chip on the bar
+function showFolderDropdown(anchor, id) {
+  closePops();
+  const box = $('ctx');
+  const items = [];
+  for (const f of bmFolders.filter((x) => x.parent === id)) items.push(el('button', { onclick: () => showFolderDropdown(anchor, f.id) }, '📁 ' + f.name));
+  for (const b of bookmarks.filter((x) => barOf(x) === id)) {
+    const row = el('button', { title: b.url, onclick: () => { closePops(); go(b.url); } }, b.title);
+    row.addEventListener('auxclick', (e) => { if (e.button === 1) createTab(b.url); });
+    row.addEventListener('contextmenu', (e) => { e.preventDefault(); bookmarkMenu(b, e.clientX, e.clientY); });
+    items.push(row);
+  }
+  if (!items.length) items.push(el('button', { disabled: true }, '(empty)'));
+  box.replaceChildren(...items);
   const r = anchor.getBoundingClientRect();
-  box.style.left = Math.max(8, Math.min(r.left, innerWidth - 260)) + 'px';
-  box.style.top = r.bottom + 4 + 'px';
   box.style.maxHeight = '60vh';
   box.style.overflow = 'auto';
-  box.hidden = false;
+  placeMenu(box, r.left, r.bottom + 4);
 }
 
 let dragId = null;
@@ -159,9 +253,17 @@ function renderBookmarkBar() {
   const bar = $('bmbar');
   updateBarVisibility();
   bar.replaceChildren();
-  if (!bookmarks.length) { bar.append(el('span', { className: 'hint' }, 'Bookmarks you add appear here (Ctrl+D). Right-click for options.')); }
-  for (const b of bookmarks) {
-    const chip = el('button', { className: 'chip', title: b.url, draggable: true, onclick: () => go(b.url) }, b.title);
+  const barItems = bookmarks.filter((b) => barOf(b) === 'bar');
+  const barFolders = bmFolders.filter((f) => f.parent === 'bar');
+  const hasOther = bookmarks.some((b) => barOf(b) === 'other') || bmFolders.some((f) => f.parent === 'other');
+  if (!bookmarks.length && !bmFolders.length) bar.append(el('span', { className: 'hint' }, 'For quick access, place your bookmarks here on the bookmarks bar. Right-click for options.'));
+  for (const f of barFolders) {
+    const chip = el('button', { className: 'chip folder', title: f.name, onclick: (ev) => showFolderDropdown(ev.currentTarget, f.id) }, f.name);
+    chip.addEventListener('contextmenu', (e) => { e.preventDefault(); folderMenu(f, e.clientX, e.clientY); });
+    bar.append(chip);
+  }
+  for (const b of barItems) {
+    const chip = el('button', { className: 'chip', title: b.title + '\n' + b.url, draggable: true, onclick: () => go(b.url) }, b.title);
     chip.dataset.id = b.id;
     chip.addEventListener('contextmenu', (e) => { e.preventDefault(); bookmarkMenu(b, e.clientX, e.clientY); });
     chip.addEventListener('auxclick', (e) => { if (e.button === 1) createTab(b.url); });
@@ -180,9 +282,8 @@ function renderBookmarkBar() {
     });
     bar.append(chip);
   }
-  const more = el('button', { className: 'chip more', title: 'All bookmarks' }, '»');
-  more.addEventListener('click', () => allBookmarksMenu(more));
-  if (bookmarks.length) bar.append(more);
+  const other = el('button', { className: 'chip folder other', title: 'Other bookmarks', onclick: (ev) => showFolderDropdown(ev.currentTarget, 'other') }, 'Other bookmarks');
+  if (hasOther) bar.append(other);
 }
 
 function initExtras() {
@@ -194,17 +295,19 @@ function initExtras() {
   $('ed-save').addEventListener('click', saveBookmarkEdit);
   $('ed-cancel').addEventListener('click', () => { $('editdlg').hidden = true; });
   for (const id of ['ed-title', 'ed-url']) $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') saveBookmarkEdit(); if (e.key === 'Escape') $('editdlg').hidden = true; });
-  $('bmbar').addEventListener('contextmenu', (e) => {
-    if (e.target === $('bmbar') || e.target.classList.contains('hint')) {
-      e.preventDefault();
+  $('bmbar').addEventListener('contextmenu', (ev) => {
+    if (ev.target === $('bmbar') || ev.target.classList.contains('hint')) {
+      ev.preventDefault();
       closePops();
       const box = $('ctx');
-      box.replaceChildren(
-        el('button', { onclick: () => { closePops(); dex.settingsSet({ bookmarksBarMode: cfg.settings.bookmarksBarMode === 'always' ? 'newtab' : 'always' }); } }, cfg.settings.bookmarksBarMode === 'always' ? 'Show bar only on new tab page' : 'Always show bookmarks bar'),
-        el('button', { onclick: () => { closePops(); dex.settingsSet({ bookmarksBar: false }); } }, 'Hide bookmarks bar'));
-      box.style.left = Math.min(e.clientX, innerWidth - 210) + 'px';
-      box.style.top = e.clientY + 'px';
-      box.hidden = false;
+      box.replaceChildren();
+      const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
+      add('Add page…', () => editBookmark(null));
+      add('Add folder…', () => promptFolder('bar'));
+      add('Bookmark manager', () => showLibrary('bookmarks'));
+      box.append(el('hr'));
+      barToggleItems(add);
+      placeMenu(box, ev.clientX, ev.clientY);
     }
   });
 }

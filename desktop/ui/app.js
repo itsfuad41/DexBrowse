@@ -38,6 +38,7 @@ let seq = 0;
 let cfg = null;
 let sync = { configured: false, signedIn: false, email: '' };
 let bookmarks = [];
+let bmFolders = [];
 let panelKind = null;
 let libTab = 'history';
 let pendingSave = null;
@@ -231,8 +232,9 @@ function createTab(url, activate = true, opts = {}) {
 }
 
 // ---------- memory saver: tabs you have not used for a while are put to sleep ----------
-function sleepTab(tab) {
-  if (tab.sleeping || tab === active || inSplit(tab) || tab.pinned || tab.audible || tab.loading || !tab.ready || !tab.view) return;
+function sleepTab(tab, force) {
+  if (tab.sleeping || !tab.view) return;
+  if (!force && (tab === active || inSplit(tab) || tab.pinned || tab.audible || tab.loading || !tab.ready)) return;
   tab.sleeping = true;
   tab.sleepUrl = tab.failedUrl || tab.url;
   tab.view.remove();
@@ -494,6 +496,8 @@ function openInternal(name) {
 async function refreshBookmarks() {
   const res = await dex.bookmarksList();
   bookmarks = res.ok ? res.data : [];
+  const fr = await dex.bmFolders();
+  bmFolders = fr.ok ? fr.data : [];
   renderBookmarkBar();
   if (active) updateToolbar();
 }
@@ -502,12 +506,14 @@ async function toggleBookmark() {
   if (!active || !isWeb(active.url)) { toast('Only web pages can be bookmarked'); return; }
   if (PRIV) { toast('Bookmarks are not saved in private windows'); return; }
   const existing = bookmarks.find((b) => b.url === active.url);
-  const res = existing ? await dex.bookmarksRemove(existing.id) : await dex.bookmarksAdd({ title: active.title, url: active.url });
+  if (existing) { showBookmarkPopup(existing, false); return; }
+  const res = await dex.bookmarksAdd({ title: active.title, url: active.url });
   if (!res.ok) { toast(res.error); return; }
   bookmarks = res.data;
   renderBookmarkBar();
   updateToolbar();
-  toast(existing ? 'Bookmark removed' : 'Bookmarked');
+  const made = bookmarks.find((b) => b.url === active.url);
+  if (made) showBookmarkPopup(made, true);
   if (panelKind === 'library' && libTab === 'bookmarks') showLibrary('bookmarks');
 }
 
@@ -571,8 +577,32 @@ async function showLibrary(which) {
     withSearch(res.ok ? res.data : [], (v) => visitRow(v, { onRemove: async () => { await dex.historyRemove(v.url); showLibrary('history'); } }),
       PRIV ? 'Private windows do not save history.' : 'No history yet.');
   } else if (libTab === 'bookmarks') {
-    withSearch(bookmarks, (b) => visitRow(b, { onRemove: async () => { const r = await dex.bookmarksRemove(b.id); if (r.ok) { bookmarks = r.data; renderBookmarkBar(); updateToolbar(); showLibrary('bookmarks'); } } }),
-      'No bookmarks yet. Press Ctrl+D on a page.');
+    const rm = async (b) => { const r = await dex.bookmarksRemove(b.id); if (r.ok) { bookmarks = r.data; renderBookmarkBar(); updateToolbar(); showLibrary('bookmarks'); } };
+    list.append(el('div', { className: 'actions' },
+      el('button', { onclick: () => promptFolder('bar', () => showLibrary('bookmarks')) }, 'New folder'),
+      el('button', { onclick: () => editBookmark(null) }, 'Add page'),
+      el('button', { onclick: async () => {
+        const tabsNow = tabs.filter((t) => isWeb(t.url));
+        if (!tabsNow.length) { toast('No web pages open'); return; }
+        const r = await dex.bmAddMany({ name: 'Saved tabs ' + new Date().toLocaleDateString(), items: tabsNow.map((t) => ({ title: t.title, url: t.url })) });
+        if (r.ok) { bmFolders = r.data.folders; bookmarks = r.data.bookmarks; renderBookmarkBar(); showLibrary('bookmarks'); } else toast(r.error);
+      } }, 'Bookmark all tabs'),
+      el('button', { onclick: async () => { const r = await dex.bmExport(); if (r.ok && r.data) toast('Saved to ' + r.data); else if (!r.ok) toast(r.error); } }, 'Export')));
+    const group = (title, id, folder) => {
+      const items = bookmarks.filter((b) => barOf(b) === id);
+      const head = el('div', { className: 'bmfolder' }, title, el('span', { className: 'sp' }));
+      if (folder) {
+        head.append(el('button', { className: 'icon', title: 'Rename', onclick: () => promptFolder(folder.parent, () => showLibrary('bookmarks'), folder) }, '✎'),
+          el('button', { className: 'icon', title: 'Delete folder', onclick: async () => { const r = await dex.bmFolderRemove(folder.id); if (r.ok) { bmFolders = r.data.folders; bookmarks = r.data.bookmarks; renderBookmarkBar(); showLibrary('bookmarks'); } } }, '✕'));
+      }
+      list.append(head);
+      if (!items.length) list.append(el('div', { className: 'empty' }, 'Empty'));
+      for (const b of items) list.append(visitRow(b, { onRemove: () => rm(b) }));
+    };
+    group('Bookmarks bar', 'bar');
+    for (const f of bmFolders.filter((x) => x.parent === 'bar')) group('📁 ' + f.name, f.id, f);
+    group('Other bookmarks', 'other');
+    for (const f of bmFolders.filter((x) => x.parent === 'other')) group('📁 ' + f.name, f.id, f);
   } else if (libTab === 'reading') {
     const res = await dex.readingList();
     const items = res.ok ? res.data : [];
@@ -711,7 +741,7 @@ async function showShields() {
 
 // ---------- menu and popovers ----------
 function closePops() {
-  for (const id of ['menu', 'shields-pop', 'ctx', 'ext-pop', 'prof-pop', 'ua-pop', 'suggest']) $(id).hidden = true;
+  for (const id of ['menu', 'shields-pop', 'ctx', 'ext-pop', 'prof-pop', 'ua-pop', 'suggest', 'bmpop']) $(id).hidden = true;
 }
 
 function showMenu() {
@@ -726,6 +756,7 @@ function showMenu() {
   item(split ? 'Exit split view' : 'Split view', '', () => (split ? endSplit() : active && startSplit(active)));
   menu.append(el('hr'));
   item('Bookmarks', 'Ctrl+Shift+O', () => showLibrary('bookmarks'));
+  item(cfg.settings.bookmarksBar ? 'Hide bookmarks bar' : 'Show bookmarks bar', 'Ctrl+Shift+B', () => dex.settingsSet({ bookmarksBar: !cfg.settings.bookmarksBar }));
   item('History', 'Ctrl+H', () => showLibrary('history'));
   item('Downloads', 'Ctrl+J', () => showLibrary('downloads'));
   item('Reading list', 'Ctrl+Shift+S', () => showLibrary('reading'));
@@ -1098,7 +1129,11 @@ async function boot() {
   $('gclose').addEventListener('click', () => { $('gbar').hidden = true; });
   dex.on('lock', async (state) => {
     if (state) { lockEnabled = true; showLock(true); }
-    else { const s = await dex.lockStatus(); lockEnabled = !!(s.data && s.data.enabled); showLock(false); }
+    else { const s = await dex.lockStatus(); lockEnabled = !!(s.data && s.data.enabled); showLock(false); if (active) wakeTab(active); applyLayout(); }
+  });
+  // the profile that was left: every tab, even the one in view, is put to sleep until it is unlocked again
+  dex.on('sleep-all', () => {
+    for (const t of tabs) sleepTab(t, true);
   });
 
   const lock = await dex.lockStatus();

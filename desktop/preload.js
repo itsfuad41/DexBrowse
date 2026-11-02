@@ -35,6 +35,12 @@ contextBridge.exposeInMainWorld('dex', {
 
   bookmarksUpdate: call('bookmarks:update'),
   bookmarksReorder: call('bookmarks:reorder'),
+  bmFolders: call('bookmarks:folders'),
+  bmFolderAdd: call('bookmarks:folder-add'),
+  bmFolderRename: call('bookmarks:folder-rename'),
+  bmFolderRemove: call('bookmarks:folder-remove'),
+  bmAddMany: call('bookmarks:add-many'),
+  bmExport: call('bookmarks:export'),
   suggest: call('suggest:query'),
   openExternal: call('external:open'),
   loginsList: call('logins:list'),

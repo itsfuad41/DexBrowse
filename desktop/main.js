@@ -107,6 +107,7 @@ const DEFAULTS = {
 let settings = JSON.parse(JSON.stringify(DEFAULTS));
 let history = [];
 let bookmarks = [];
+let bmFolders = []; // { id, name, parent: 'bar' | 'other' }
 let reading = [];
 let logins = [];
 let siteRules = {};
@@ -633,8 +634,62 @@ handle('bookmarks:update', (ctx, id, patch) => {
   if (!b) throw new Error('Bookmark not found');
   if (typeof patch.title === 'string' && patch.title.trim()) b.title = patch.title.trim().slice(0, 200);
   if (typeof patch.url === 'string' && /^https?:\/\//i.test(patch.url)) b.url = patch.url;
+  if (typeof patch.folder === 'string' && (['bar', 'other'].includes(patch.folder) || bmFolders.some((f) => f.id === patch.folder))) b.folder = patch.folder;
   writeJson('bookmarks.json', bookmarks);
   return bookmarks;
+});
+// folders (Brave-style: "Bookmarks bar", "Other bookmarks" and your own folders)
+const saveFolders = () => writeJson('bookmark-folders.json', bmFolders);
+const noPrivBm = (ctx) => { needUnlock(); if (ctx.priv) throw new Error('Not available in a private window'); };
+handle('bookmarks:folders', () => { needUnlock(); return bmFolders; });
+handle('bookmarks:folder-add', (ctx, { name, parent }) => {
+  noPrivBm(ctx);
+  const n = String(name || '').trim().slice(0, 100);
+  if (!n) throw new Error('Enter a folder name');
+  const f = { id: crypto.randomUUID(), name: n, parent: parent === 'other' ? 'other' : 'bar' };
+  bmFolders.push(f);
+  saveFolders();
+  return { folders: bmFolders, id: f.id };
+});
+handle('bookmarks:folder-rename', (ctx, id, name) => {
+  noPrivBm(ctx);
+  const f = bmFolders.find((x) => x.id === id);
+  if (!f || !String(name || '').trim()) throw new Error('Folder not found');
+  f.name = String(name).trim().slice(0, 100);
+  saveFolders();
+  return bmFolders;
+});
+handle('bookmarks:folder-remove', (ctx, id) => {
+  noPrivBm(ctx);
+  bmFolders = bmFolders.filter((f) => f.id !== id);
+  bookmarks = bookmarks.filter((b) => b.folder !== id); // like Brave, the folder's bookmarks go with it
+  saveFolders();
+  writeJson('bookmarks.json', bookmarks);
+  return { folders: bmFolders, bookmarks };
+});
+handle('bookmarks:add-many', (ctx, { name, items }) => {
+  noPrivBm(ctx);
+  const f = { id: crypto.randomUUID(), name: String(name || 'Saved tabs').slice(0, 100), parent: 'bar' };
+  bmFolders.push(f);
+  for (const it of (items || [])) {
+    if (!/^https?:\/\//i.test(it.url)) continue;
+    bookmarks.push({ id: crypto.randomUUID(), title: String(it.title || it.url).slice(0, 200), url: it.url, added: Date.now(), folder: f.id });
+  }
+  saveFolders();
+  writeJson('bookmarks.json', bookmarks);
+  return { folders: bmFolders, bookmarks };
+});
+handle('bookmarks:export', async (ctx) => {
+  noPrivBm(ctx);
+  const { canceled, filePath } = await dialog.showSaveDialog(ctx.win || undefined, {
+    defaultPath: path.join(app.getPath('documents'), 'DexBrowse-bookmarks.html'), filters: [{ name: 'Bookmarks', extensions: ['html'] }]
+  });
+  if (canceled || !filePath) return null;
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const links = (id) => bookmarks.filter((b) => (b.folder || 'bar') === id).map((b) => `<DT><A HREF="${esc(b.url)}">${esc(b.title)}</A>`).join('\n');
+  const block = (title, id) => `<DT><H3>${esc(title)}</H3>\n<DL><p>\n${links(id)}\n${bmFolders.filter((f) => f.parent === id).map((f) => `<DT><H3>${esc(f.name)}</H3>\n<DL><p>\n${links(f.id)}\n</DL><p>`).join('\n')}\n</DL><p>`;
+  fs.writeFileSync(filePath, `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n<DL><p>\n${block('Bookmarks bar', 'bar')}\n${block('Other bookmarks', 'other')}\n</DL><p>\n`);
+  return filePath;
 });
 handle('bookmarks:reorder', (ctx, ids) => {
   needUnlock();
@@ -837,6 +892,12 @@ handle('logins:never-remove', (_ctx, origin) => {
 });
 
 // lock: unlocking needs the passcode of the profile that is open (same passcode as the passcode screen)
+// the profile the person just left: locked, and every tab put to sleep so it uses almost no memory
+function parkWindows() {
+  lockNow();
+  broadcast('sleep-all', true);
+  for (const { win } of wins.values()) { try { if (!win.isDestroyed()) win.minimize(); } catch (_) { /* ignore */ } }
+}
 function lockNow() {
   if (GUEST) return false;
   locked = true;
@@ -861,7 +922,7 @@ handle('lock:unlock', (_ctx, pass) => {
   const leave = (args) => {
     failures = 0;
     spawnSelf(args);
-    setTimeout(() => app.quit(), 900);
+    parkWindows(); // this profile's windows stay open but locked and asleep, they are not closed
     return 'opening';
   };
   if (other) return leave(other.id === 'default' ? ['--open-default'] : [`--profile=${other.id}`]);
@@ -958,6 +1019,7 @@ handle('profiles:add', (_ctx, { name, passcode, recovery }) => {
 handle('profiles:switch', () => {
   if (IS_LAUNCHER) showLauncher();
   else spawnSelf(); // a plain launch reaches the passcode screen of the main process
+  if (!GUEST) parkWindows();
   return true;
 });
 handle('profiles:delete', (_ctx, passcode) => {
@@ -1119,6 +1181,9 @@ function createWindow(priv = false) {
     icon: APP_ICON,
     title: GUEST ? 'DexBrowse (Guest)' : (priv ? 'DexBrowse (Private)' : 'DexBrowse By Fuad') + (PROFILE_ID !== 'default' ? ' \u2013 ' + currentProfile().name : ''),
     autoHideMenuBar: true,
+    // Brave/Chrome style: tabs sit in the title bar, the system only draws the window buttons
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: priv ? '#1A0F2E' : '#101116', symbolColor: '#EDEEF2', height: 40 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1287,6 +1352,7 @@ function startBrowser() {
   if (!(settings.engine in ENGINES)) settings.engine = DEFAULTS.engine;
   history = readJson('history.json', []);
   bookmarks = readJson('bookmarks.json', []);
+  bmFolders = readJson('bookmark-folders.json', []);
   reading = readJson('reading.json', []);
   logins = readJson('logins.json', []);
   siteRules = readJson('sites.json', {});
