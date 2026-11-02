@@ -1,7 +1,7 @@
 {
   "name": "dexbrowse-desktop",
   "productName": "DexBrowse",
-  "version": "2.18.1",
+  "version": "2.19.0",
   "description": "DexBrowse By Fuad - Chromium desktop browser",
   "main": "main.js",
   "author": "Md. Fuad Hasan",

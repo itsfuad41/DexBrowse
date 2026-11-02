@@ -6,6 +6,9 @@ const PARTITION = PRIV ? 'private' : 'persist:browse';
 const START_BASE = new URL('start.html', location.href).href;
 
 const ICONS = {
+  mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>',
+  card: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M14 10h4M14 14h3M6 16c.6-1.5 1.7-2 3-2s2.4.5 3 2"/>',
+  chat: '<path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z"/>',
   back: '<path d="M15 18l-6-6 6-6"/>',
   forward: '<path d="M9 6l6 6-6 6"/>',
   reload: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
@@ -41,6 +44,7 @@ let pendingSave = null;
 let settingsOpen = false;
 let lockEnabled = false;
 let googleBlockedUrl = '';
+let split = null; // { a, b, ratio } two tabs shown side by side
 
 // ---------- helpers ----------
 function el(tag, props, ...children) {
@@ -57,6 +61,7 @@ function iconEl(name, cls) {
   span.innerHTML = svg(name);
   return span;
 }
+function setIconEl(node, name) { node.insertAdjacentHTML('afterbegin', svg(name)); }
 function setIcon(id, name) {
   $(id).insertAdjacentHTML('afterbegin', svg(name));
 }
@@ -156,6 +161,7 @@ function buildView(tab) {
   view.setAttribute('plugins', '');
   view.setAttribute('preload', cfg.guestPreload);
 
+  view.addEventListener('focus', () => { if (split && inSplit(tab) && tab !== active) activateTab(tab); });
   view.addEventListener('dom-ready', () => {
     tab.ready = true;
     try {
@@ -226,7 +232,7 @@ function createTab(url, activate = true, opts = {}) {
 
 // ---------- memory saver: tabs you have not used for a while are put to sleep ----------
 function sleepTab(tab) {
-  if (tab.sleeping || tab === active || tab.pinned || tab.audible || tab.loading || !tab.ready || !tab.view) return;
+  if (tab.sleeping || tab === active || inSplit(tab) || tab.pinned || tab.audible || tab.loading || !tab.ready || !tab.view) return;
   tab.sleeping = true;
   tab.sleepUrl = tab.failedUrl || tab.url;
   tab.view.remove();
@@ -241,6 +247,7 @@ function wakeTab(tab) {
   tab.view = buildView(tab);
   $('views').append(tab.view);
   tab.view.setAttribute('src', tab.sleepUrl || tab.url);
+  if (split) applyLayout();
 }
 setInterval(() => {
   if (!cfg || !cfg.settings.memorySaver) return;
@@ -269,13 +276,74 @@ function recordVisit(tab) {
   dex.historyAdd({ url: tab.url, title: tab.title });
 }
 
+// ---------- split view: two tabs side by side ----------
+const inSplit = (t) => !!split && (t === split.a || t === split.b);
+function applyLayout() {
+  const bar = $('splitbar');
+  for (const t of tabs) {
+    if (!t.view) continue;
+    t.view.style.left = t.view.style.width = t.view.style.right = '';
+    t.view.classList.remove('splitfocus');
+    t.view.classList.toggle('active', t === active && !inSplit(t));
+  }
+  const showing = split && active && inSplit(active) && !settingsOpen;
+  bar.hidden = !showing;
+  if (!showing) return;
+  wakeTab(split.a);
+  wakeTab(split.b);
+  const pct = split.ratio * 100;
+  split.a.view.classList.add('active', 'splitfocus');
+  split.b.view.classList.add('active', 'splitfocus');
+  split.a.view.style.left = '0';
+  split.a.view.style.width = `calc(${pct}% - 3px)`;
+  split.b.view.style.left = `calc(${pct}% + 3px)`;
+  split.b.view.style.width = `calc(${100 - pct}% - 3px)`;
+  split.a.view.classList.toggle('paneon', active === split.a);
+  split.b.view.classList.toggle('paneon', active === split.b);
+  bar.style.left = `calc(${pct}% - 3px)`;
+}
+function startSplit(tab) {
+  if (inSplit(tab)) return;
+  let partner = tabs.filter((t) => t !== tab && !t.pinned && !inSplit(t)).sort((x, y) => y.lastActive - x.lastActive)[0];
+  if (!partner) partner = createTab(undefined, false);
+  split = { a: tab, b: partner, ratio: 0.5 };
+  activateTab(tab);
+  toast('Split view: click a side to work in it. Drag the divider to resize.');
+}
+function endSplit() {
+  split = null;
+  applyLayout();
+  renderTabs();
+}
+function swapSplit() {
+  if (!split) return;
+  [split.a, split.b] = [split.b, split.a];
+  applyLayout();
+}
+(function initSplitBar() {
+  const bar = $('splitbar');
+  bar.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button')) return;
+    e.preventDefault();
+    const box = $('views').getBoundingClientRect();
+    const shield = el('div', { className: 'splitshield' });
+    $('views').append(shield); // keeps the pages from swallowing the mouse while dragging
+    const move = (ev) => { split.ratio = Math.min(0.8, Math.max(0.2, (ev.clientX - box.left) / box.width)); applyLayout(); };
+    const up = () => { shield.remove(); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+  $('splitswap').addEventListener('click', swapSplit);
+  $('splitclose').addEventListener('click', endSplit);
+})();
+
 function activateTab(tab) {
   closeSettings();
   if (active && active !== tab) active.lastActive = Date.now();
   tab.lastActive = Date.now();
   wakeTab(tab);
   active = tab;
-  for (const t of tabs) if (t.view) t.view.classList.toggle('active', t === tab);
+  applyLayout();
   renderTabs();
   updateToolbar();
   $('findcount').textContent = '';
@@ -286,11 +354,12 @@ function closeTab(tab) {
   const index = tabs.indexOf(tab);
   if (index < 0) return;
   if (isWeb(tab.url)) closed.push(tab.url);
+  if (inSplit(tab)) split = null;
   tabs.splice(index, 1);
   if (tab.view) tab.view.remove();
   if (!tabs.length) { createTab(); return; }
   if (active === tab) activateTab(tabs[Math.min(index, tabs.length - 1)]);
-  else renderTabs();
+  else { applyLayout(); renderTabs(); }
   scheduleSessionSave();
 }
 
@@ -306,7 +375,7 @@ function renderTabs() {
   const strip = $('tabs');
   strip.replaceChildren();
   for (const tab of tabs) {
-    const node = el('div', { className: 'tab' + (tab === active && !settingsOpen ? ' active' : '') + (tab.pinned ? ' pinned' : '') + (tab.sleeping ? ' sleeping' : ''), title: tab.title + (tab.sleeping ? ' (sleeping to save memory)' : '') });
+    const node = el('div', { className: 'tab' + (tab === active && !settingsOpen ? ' active' : '') + (tab.pinned ? ' pinned' : '') + (tab.sleeping ? ' sleeping' : '') + (inSplit(tab) ? ' insplit' : ''), title: tab.title + (tab.sleeping ? ' (sleeping to save memory)' : '') });
     if (tab.loading) node.append(el('span', { className: 'spin' }));
     else if (tab.favicon) node.append(el('img', { src: tab.favicon, alt: '' }));
     else if (isStart(tab.url)) node.append(el('img', { src: 'icon.png', alt: '' }));
@@ -354,6 +423,8 @@ function showTabMenu(tab, x, y) {
   const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
   add('Reload', () => tab.ready && tab.view.reload());
   add('Duplicate', () => createTab(isStart(tab.url) ? 'dex://start' : tab.url));
+  if (inSplit(tab)) { add('Exit split view', endSplit); add('Swap split sides', swapSplit); }
+  else if (!tab.pinned) add('Split view', () => startSplit(tab));
   add(tab.pinned ? 'Unpin tab' : 'Pin tab', () => togglePin(tab));
   add(tab.muted ? 'Unmute site' : 'Mute site', () => toggleMute(tab));
   box.append(el('hr'));
@@ -652,6 +723,7 @@ function showMenu() {
   item('New tab', 'Ctrl+T', () => createTab());
   item('New window', 'Ctrl+N', () => dex.windowNew(false));
   item('New private window', 'Ctrl+Shift+N', () => dex.windowNew(true));
+  item(split ? 'Exit split view' : 'Split view', '', () => (split ? endSplit() : active && startSplit(active)));
   menu.append(el('hr'));
   item('Bookmarks', 'Ctrl+Shift+O', () => showLibrary('bookmarks'));
   item('History', 'Ctrl+H', () => showLibrary('history'));
@@ -810,6 +882,8 @@ async function onGuestMessage(tab, e) {
     } else {
       tab.view.send('login-accounts', res.data);
     }
+  } else if (e.channel === 'login-manage') {
+    openSettings('passwords');
   } else if (e.channel === 'login-pick') {
     const one = await dex.loginsFill(data.id);
     if (one.ok && one.data) tab.view.send('login-fill', one.data);
@@ -833,6 +907,7 @@ function closeSettings() {
   if (!settingsOpen) return;
   settingsOpen = false;
   $('settings').hidden = true;
+  applyLayout();
   renderTabs();
   updateToolbar();
 }
@@ -841,6 +916,7 @@ function openSettings(section) {
   closePops();
   closePanel();
   $('settings').hidden = false;
+  applyLayout();
   renderTabs();
   renderSettings(section);
 }
@@ -1011,7 +1087,10 @@ async function boot() {
       toast(`Downloading update ${u.version}…`);
     }
   });
-  $('updatego').addEventListener('click', () => dex.updateInstall());
+  dex.updateStatus().then((r) => { // windows opened after the download finished still need to show the bar
+    if (r.ok && r.data.state === 'ready') { $('updatetext').textContent = `DexBrowse ${r.data.version} is ready.`; $('updatebar').hidden = false; }
+  });
+  $('updatego').addEventListener('click', () => { $('updatego').textContent = 'Installing…'; dex.updateInstall(); });
   $('updateclose').addEventListener('click', () => { $('updatebar').hidden = true; });
   setIcon('updateclose', 'close');
   setIcon('gclose', 'close');

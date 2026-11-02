@@ -768,6 +768,57 @@ handle('logins:reveal', (_ctx, id) => {
   if (!l) throw new Error('Login not found');
   return decryptLogin(l);
 });
+const loginOrigin = (v) => { try { const u = new URL(/^[a-z]+:\/\//i.test(v) ? v : 'https://' + v); return /^https?:$/.test(u.protocol) ? u.origin : ''; } catch (_) { return ''; } };
+handle('logins:add', (ctx, { site, username, password }) => {
+  needUnlock();
+  if (ctx.priv) throw new Error('Not available in a private window');
+  const origin = loginOrigin(String(site || '').trim());
+  if (!origin) throw new Error('Enter a website address');
+  if (!password) throw new Error('Enter a password');
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is not available on this system');
+  const pw = safeStorage.encryptString(String(password)).toString('base64');
+  const existing = logins.find((l) => l.origin === origin && l.username === (username || ''));
+  if (existing) Object.assign(existing, { pw, updated: Date.now() });
+  else logins.unshift({ id: crypto.randomUUID(), origin, username: String(username || ''), pw, updated: Date.now() });
+  writeJson('logins.json', logins);
+  return true;
+});
+handle('logins:update', (ctx, { id, username, password }) => {
+  needUnlock();
+  if (ctx.priv) throw new Error('Not available in a private window');
+  const l = logins.find((x) => x.id === id);
+  if (!l) throw new Error('Login not found');
+  if (typeof username === 'string') l.username = username;
+  if (password) l.pw = safeStorage.encryptString(String(password)).toString('base64');
+  l.updated = Date.now();
+  writeJson('logins.json', logins);
+  return true;
+});
+// which saved passwords are reused on several sites or look weak; nothing leaves the main process except ids
+handle('logins:audit', () => {
+  needUnlock();
+  if (!safeStorage.isEncryptionAvailable()) return { reused: [], weak: [] };
+  const seen = new Map();
+  const weak = [];
+  for (const l of logins) {
+    let p = '';
+    try { p = decryptLogin(l); } catch (_) { continue; }
+    const kinds = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((r) => r.test(p)).length;
+    if (p.length < 8 || (p.length < 12 && kinds < 3) || kinds < 2) weak.push(l.id);
+    const key = crypto.createHash('sha256').update(p).digest('hex');
+    if (!seen.has(key)) seen.set(key, []);
+    seen.get(key).push(l.id);
+  }
+  return { reused: [...seen.values()].filter((a) => a.length > 1).flat(), weak };
+});
+handle('logins:generate', () => {
+  const sets = ['abcdefghijkmnopqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*-_?'];
+  const all = sets.join('');
+  const out = sets.map((s) => s[crypto.randomInt(s.length)]);
+  while (out.length < 18) out.push(all[crypto.randomInt(all.length)]);
+  for (let i = out.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [out[i], out[j]] = [out[j], out[i]]; }
+  return out.join('');
+});
 handle('logins:delete', (_ctx, id) => {
   logins = logins.filter((l) => l.id !== id);
   writeJson('logins.json', logins);
@@ -982,7 +1033,7 @@ handle('import:file', async (ctx, kind) => {
 });
 
 handle('external:open', (_ctx, url) => {
-  if (!/^https?:\/\//i.test(String(url))) throw new Error('Only web addresses can be opened');
+  if (!/^https?:\/\//i.test(String(url)) && !/^mailto:itsfuad\.41@outlook\.com(\?subject=DexBrowse)?$/i.test(String(url))) throw new Error('Only web addresses can be opened');
   shell.openExternal(String(url));
   return true;
 });
@@ -1099,13 +1150,43 @@ function createWindow(priv = false) {
 }
 
 // ---------- self update ----------
+// every running DexBrowse process registers itself so an update can close them all before installing
+const RUN_DIR = path.join(ROOT_DIR, 'run');
+function registerProcess() {
+  try {
+    fs.mkdirSync(RUN_DIR, { recursive: true });
+    fs.writeFileSync(path.join(RUN_DIR, `${process.pid}.json`), JSON.stringify({ pid: process.pid, profile: PROFILE_ID, guest: GUEST }));
+  } catch (_) { /* ignore */ }
+}
+const unregisterProcess = () => { try { fs.rmSync(path.join(RUN_DIR, `${process.pid}.json`), { force: true }); } catch (_) { /* ignore */ } };
+async function closeOtherInstances() {
+  let files = [];
+  try { files = fs.readdirSync(RUN_DIR); } catch (_) { return; }
+  for (const f of files) {
+    let info = null;
+    try { info = JSON.parse(fs.readFileSync(path.join(RUN_DIR, f), 'utf8')); } catch (_) { continue; }
+    if (!info || info.pid === process.pid) continue;
+    let alive = true;
+    try { process.kill(info.pid, 0); } catch (_) { alive = false; }
+    if (!alive) { try { fs.rmSync(path.join(RUN_DIR, f), { force: true }); } catch (_) { /* ignore */ } continue; }
+    if (info.guest) { try { process.kill(info.pid); } catch (_) { /* ignore */ } continue; }
+    spawnSelf([...(info.profile && info.profile !== 'default' ? [`--profile=${info.profile}`] : []), '--quit-for-update']);
+  }
+  await new Promise((r) => setTimeout(r, 2500));
+}
+
 const updater = createUpdater({
   isAuto: () => !GUEST && settings.autoUpdate !== false,
-  notify: (u) => broadcast('update', u)
+  notify: (u) => broadcast('update', u),
+  logFile: path.join(ROOT_DIR, 'updater.log'),
+  beforeInstall: closeOtherInstances
 });
 handle('update:status', () => updater.status());
 handle('update:check', () => updater.check());
 handle('update:install', () => updater.install());
+handle('update:log', () => {
+  try { return fs.readFileSync(updater.logFile, 'utf8').split('\n').slice(-40).join('\n'); } catch (_) { return 'No update activity yet.'; }
+});
 
 // ---------- passcode screen (main process) ----------
 let launcherWin = null;
@@ -1232,9 +1313,12 @@ function startBrowser() {
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
+} else if (process.argv.includes('--quit-for-update')) {
+  app.quit(); // started only to close a running copy for an update, but none was running
 } else {
   // Launching DexBrowse again: the main process asks for a passcode, profile processes open another window.
   app.on('second-instance', (_event, argv) => {
+    if ((argv || []).includes('--quit-for-update')) { app.quit(); return; }
     if (IS_LAUNCHER && !OPEN_DEFAULT_ARG(argv)) { showLauncher(); return; }
     if (IS_LAUNCHER) startBrowser();
     const win = createWindow(false);
@@ -1260,7 +1344,9 @@ if (!gotLock) {
     });
   });
 
+  registerProcess();
   app.on('before-quit', () => { if (started) writeJson('stats.json', stats); });
+  app.on('quit', unregisterProcess);
   app.on('quit', () => { if (GUEST) fs.rmSync(GUEST_DIR, { recursive: true, force: true }); });
   app.on('window-all-closed', () => {
     if (launcherWin) return;

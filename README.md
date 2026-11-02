@@ -131,3 +131,9 @@ Web SDK configuration and add the desktop client ID to the safelist.
 ## Releases
 
 Push a tag such as `v2.14.0` to build and publish both the APK and the PC installer to GitHub Releases.
+
+### 2.19.0 (PC)
+- **Split view**: show two tabs side by side (tab right-click or main menu → Split view), drag the divider to resize, swap sides or exit from the divider buttons.
+- **Password manager**: search, grouped by site, add/edit entries, built-in password generator, "Reused" and "Weak" warnings. Forms with a new-password field offer a strong generated password and a "Manage passwords" link.
+- **About**: developer contact card.
+- **Auto-update**: updater log (About → Update log), update bar shown in windows opened after the download, and other DexBrowse processes are closed before the installer runs.

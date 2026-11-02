@@ -115,9 +115,24 @@ ipcRenderer.on('login-fill', (_event, creds) => { hideSuggest(); fill(creds); })
 let accounts = [];
 let box = null;
 function hideSuggest() { if (box) { box.remove(); box = null; } }
-function showSuggest(input) {
+function strongPassword() {
+  const sets = ['abcdefghijkmnopqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*-_?'];
+  const all = sets.join('');
+  const rnd = (n) => { const a = new Uint32Array(1); let x; do { crypto.getRandomValues(a); x = a[0]; } while (x >= 4294967296 - (4294967296 % n)); return x % n; };
+  const out = sets.map((s) => s[rnd(s.length)]);
+  while (out.length < 18) out.push(all[rnd(all.length)]);
+  for (let i = out.length - 1; i > 0; i--) { const j = rnd(i + 1); [out[i], out[j]] = [out[j], out[i]]; }
+  return out.join('');
+}
+// a new-password field: marked as such by the page, or a form with two password fields (sign-up / change password)
+function isNewPasswordField(pw) {
+  if (/new-password/i.test(pw.autocomplete || '')) return true;
+  const scope = pw.form || document;
+  return [...scope.querySelectorAll('input[type=password]')].filter((p) => !p.disabled && isVisible(p)).length >= 2;
+}
+function showSuggest(input, offerNew) {
   hideSuggest();
-  if (!accounts.length) return;
+  if (!accounts.length && !offerNew) return;
   const r = input.getBoundingClientRect();
   box = document.createElement('div');
   const root = box.attachShadow({ mode: 'closed' });
@@ -129,8 +144,21 @@ function showSuggest(input) {
   inner.className = 'b';
   const head = document.createElement('div');
   head.className = 'h';
-  head.textContent = 'DexBrowse saved logins';
+  head.textContent = 'DexBrowse passwords';
   inner.append(head);
+  if (offerNew) {
+    const gen = strongPassword();
+    const b = document.createElement('button');
+    b.innerHTML = '<b>Use a strong password</b><br><span style="font:12px monospace;color:#475569"></span>';
+    b.querySelector('span').textContent = gen;
+    b.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const scope = input.form || document;
+      for (const p of scope.querySelectorAll('input[type=password]')) if (!p.disabled && isVisible(p)) setValue(p, gen);
+      hideSuggest();
+    });
+    inner.append(b);
+  }
   for (const a of accounts) {
     const b = document.createElement('button');
     b.textContent = a.username || '(no username)';
@@ -141,6 +169,11 @@ function showSuggest(input) {
     });
     inner.append(b);
   }
+  const manage = document.createElement('button');
+  manage.textContent = 'Manage passwords…';
+  manage.style.cssText = 'color:#4f46e5;border-top:1px solid #e2e8f0';
+  manage.addEventListener('mousedown', (e) => { e.preventDefault(); ipcRenderer.sendToHost('login-manage', { origin: location.origin }); hideSuggest(); });
+  inner.append(manage);
   root.append(style, inner);
   Object.assign(box.style, { position: 'fixed', zIndex: 2147483647, left: Math.max(0, r.left) + 'px', top: r.bottom + 2 + 'px', minWidth: Math.max(r.width, 220) + 'px' });
   document.documentElement.append(box);
@@ -148,9 +181,11 @@ function showSuggest(input) {
 ipcRenderer.on('login-accounts', (_event, list) => { accounts = list || []; });
 document.addEventListener('focusin', (e) => {
   const t = e.target;
-  if (!accounts.length || !t || t.tagName !== 'INPUT') return;
+  if (!t || t.tagName !== 'INPUT') return;
   const type = (t.type || 'text').toLowerCase();
   const pw = type === 'password' ? t : null;
+  if (pw && isVisible(pw) && isNewPasswordField(pw)) { showSuggest(pw, true); return; }
+  if (!accounts.length) return;
   const user = pw ? null : (TEXTLIKE.includes(type) ? t : null);
   if (pw) { if (isVisible(pw)) showSuggest(pw); return; }
   if (user) {
