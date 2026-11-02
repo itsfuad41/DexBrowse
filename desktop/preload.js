@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('dex', {
   sessionLoad: call('session:load'),
   windowNew: call('window:new'),
   windowQuit: call('app:quit'),
+  windowClose: call('window:close'),
   savePdf: call('page:savepdf'),
   activity: call('app:activity'),
 

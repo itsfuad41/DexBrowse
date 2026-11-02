@@ -4,6 +4,7 @@ const {
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+process.on('uncaughtException', (err) => { try { console.error(err); } catch (_) { /* ignore */ } });
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
 const sync = require('./sync');
@@ -1101,6 +1102,7 @@ handle('external:open', (_ctx, url) => {
 });
 handle('window:new', (_ctx, priv) => { createWindow(!!priv); return true; });
 handle('app:quit', () => { app.quit(); return true; });
+handle('window:close', (ctx) => { if (ctx.win && !ctx.win.isDestroyed()) ctx.win.close(); return true; });
 handle('page:savepdf', async (ctx, base64, name) => {
   const { canceled, filePath } = await dialog.showSaveDialog(ctx.win || undefined, {
     defaultPath: path.join(app.getPath('documents'), `${String(name || 'page').replace(/[<>:"/\\|?*]/g, '_')}.pdf`),
@@ -1413,7 +1415,13 @@ if (!gotLock) {
   registerProcess();
   app.on('before-quit', () => { if (started) writeJson('stats.json', stats); });
   app.on('quit', unregisterProcess);
-  app.on('quit', () => { if (GUEST) fs.rmSync(GUEST_DIR, { recursive: true, force: true }); });
+  // Windows may still hold the cache files for a moment when the guest browser exits: retry, never crash
+  app.on('quit', () => {
+    if (!GUEST) return;
+    for (let i = 0; i < 5; i++) {
+      try { fs.rmSync(GUEST_DIR, { recursive: true, force: true }); return; } catch (_) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200); }
+    }
+  });
   app.on('window-all-closed', () => {
     if (launcherWin) return;
     if (process.platform !== 'darwin') app.quit();

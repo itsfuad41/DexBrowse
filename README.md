@@ -142,3 +142,8 @@ Push a tag such as `v2.14.0` to build and publish both the APK and the PC instal
 - **Bookmarks like Brave**: "Bookmark added" popup under the star (name, folder, remove), folders on the bookmarks bar, "Other bookmarks", dropdowns, Add page / Add folder, Open in new window / private window, bookmark manager with folders, Bookmark all tabs, Export to HTML.
 - **Browser-style title bar**: tabs sit in the title bar; no separate title row above them.
 - **Switching profile**: the profile you left is locked, all its tabs are put to sleep and its window is minimized, not closed.
+
+### 2.20.1 (PC)
+- Closing the last tab closes the window (like Chrome/Brave).
+- Guest browser no longer shows an error box when Windows holds cache files at exit.
+- Task Manager description is now just "DexBrowse".

@@ -359,7 +359,7 @@ function closeTab(tab) {
   if (inSplit(tab)) split = null;
   tabs.splice(index, 1);
   if (tab.view) tab.view.remove();
-  if (!tabs.length) { createTab(); return; }
+  if (!tabs.length) { dex.windowClose(); return; } // closing the last tab closes the window, like Chrome and Brave
   if (active === tab) activateTab(tabs[Math.min(index, tabs.length - 1)]);
   else { applyLayout(); renderTabs(); }
   scheduleSessionSave();
