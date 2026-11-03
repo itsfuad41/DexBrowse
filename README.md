@@ -150,3 +150,8 @@ Push a tag such as `v2.14.0` to build and publish both the APK and the PC instal
 
 ### 2.21.0 (Android)
 Brought the PC features to the Android app: Brave-style bookmarks with folders and a "Bookmark added" popup, a password manager (search, add/edit, generator, reused/weak warnings, strong-password suggestion on sign-up forms), a developer card in About, update check against GitHub releases, split view, and closing the last tab closes the browser.
+
+### 2.22.0
+- PC: extensions work like Chrome. Pinned extensions show on the toolbar and open their popup, options pages open in a tab, extensions can be pinned, turned off/on and removed from the puzzle menu or the toolbar icon's right-click menu.
+- PC: closing a tab stops its audio/video and the window ends its process, so no media control stays in the Windows media panel.
+- Android: "I am not a robot" checks now complete (third-party cookies are accepted).

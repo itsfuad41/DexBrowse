@@ -1,7 +1,7 @@
 {
   "name": "dexbrowse-desktop",
   "productName": "DexBrowse",
-  "version": "2.21.0",
+  "version": "2.22.0",
   "description": "DexBrowse",
   "main": "main.js",
   "author": "Md. Fuad Hasan",

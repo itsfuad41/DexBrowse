@@ -77,6 +77,26 @@ function readManifest(dir) {
   return { name: msg(manifest.name) || 'Extension', version: manifest.version || '', description: msg(manifest.description) || '' };
 }
 
+function manifestOf(dir) {
+  try { return JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8').replace(/^﻿/, '')); } catch (_) { return {}; }
+}
+// toolbar icon of the extension as a data URL (best size near 32-48px)
+function iconOf(dir, m) {
+  const act = m.action || m.browser_action || {};
+  const pool = typeof act.default_icon === 'string' ? { 32: act.default_icon } : (act.default_icon || m.icons || {});
+  const sizes = Object.keys(pool).map(Number).filter((n) => n > 0).sort((a, b) => a - b);
+  const pick = sizes.find((n) => n >= 32) || sizes[sizes.length - 1];
+  const rel = pick ? pool[pick] : null;
+  if (!rel) return '';
+  try {
+    const file = path.resolve(dir, String(rel).replace(/^\//, ''));
+    if (!file.startsWith(path.resolve(dir) + path.sep)) return '';
+    const ext = path.extname(file).slice(1).toLowerCase();
+    const mime = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/' + (ext || 'png');
+    return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`;
+  } catch (_) { return ''; }
+}
+
 function parseStoreId(text) {
   text = String(text || '').trim();
   if (ID_RE.test(text)) return text;
@@ -99,6 +119,7 @@ function createExtensions({ getSession, dir, chromeVersion }) {
   };
 
   async function load(entry) {
+    if (entry.disabled) return null;
     const ses = getSession();
     const ext = await ses.loadExtension(entry.dir, { allowFileAccess: true });
     entry.runtimeId = ext.id;
@@ -128,7 +149,7 @@ function createExtensions({ getSession, dir, chromeVersion }) {
     if (existing && existing.runtimeId) {
       try { await getSession().removeExtension(existing.runtimeId); } catch (_) { /* already gone */ }
     }
-    const entry = { id, dir: entryDir, source, storeId: storeId || null, ...info, installedAt: Date.now() };
+    const entry = { id, dir: entryDir, source, storeId: storeId || null, ...info, installedAt: Date.now(), pinned: true };
     await load(entry);
     registry = registry.filter((e) => e.id !== id);
     registry.unshift(entry);
@@ -180,10 +201,48 @@ function createExtensions({ getSession, dir, chromeVersion }) {
     return true;
   }
 
-  const list = () => registry.map(({ id, name, version, description, source, storeId, error }) =>
-    ({ id, name, version, description, source, storeId, error: !!error }));
+  const iconCache = new Map();
+  const list = () => registry.map((e) => {
+    const m = manifestOf(e.dir);
+    const act = m.action || m.browser_action || {};
+    if (!iconCache.has(e.id)) iconCache.set(e.id, iconOf(e.dir, m));
+    return {
+      id: e.id, name: e.name, version: e.version, description: e.description, source: e.source, storeId: e.storeId,
+      error: !!e.error, enabled: !e.disabled, pinned: e.pinned !== false, icon: iconCache.get(e.id),
+      hasPopup: !!act.default_popup, hasOptions: !!((m.options_ui && m.options_ui.page) || m.options_page)
+    };
+  });
+  const find = (id) => {
+    const e = registry.find((x) => x.id === id);
+    if (!e) return null;
+    const m = manifestOf(e.dir);
+    const act = m.action || m.browser_action || {};
+    return {
+      runtimeId: e.runtimeId, disabled: !!e.disabled, name: e.name,
+      popup: act.default_popup ? String(act.default_popup).replace(/^\//, '') : '',
+      options: ((m.options_ui && m.options_ui.page) || m.options_page || '').replace(/^\//, '')
+    };
+  };
+  async function setEnabled(id, on) {
+    const entry = registry.find((x) => x.id === id);
+    if (!entry) throw new Error('Extension not found');
+    if (on) { entry.disabled = false; entry.error = false; await load(entry); }
+    else {
+      try { if (entry.runtimeId) await getSession().removeExtension(entry.runtimeId); } catch (_) { /* already gone */ }
+      entry.disabled = true;
+    }
+    save();
+    return list();
+  }
+  function setPinned(id, on) {
+    const entry = registry.find((x) => x.id === id);
+    if (!entry) throw new Error('Extension not found');
+    entry.pinned = !!on;
+    save();
+    return list();
+  }
 
-  return { loadAll, installBuffer, installFromStore, installFile, installUnpacked, remove, list, parseStoreId };
+  return { loadAll, installBuffer, installFromStore, installFile, installUnpacked, remove, list, find, setEnabled, setPinned, parseStoreId };
 }
 
 module.exports = { createExtensions, parseStoreId, readZip, crxToZip };

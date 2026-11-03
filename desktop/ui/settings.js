@@ -381,7 +381,10 @@ async function renderSettings(section) {
       if (!list.length) card.append(el('div', { className: 'srow' }, el('div', { className: 'l' }, el('span', {}, PRIV ? 'Extensions are disabled in private windows.' : 'No extensions installed yet.'))));
       for (const x of list) {
         card.append(sRow(x.name, 'v' + x.version + (x.description ? ' · ' + x.description : ''),
-          sBtn('Remove', async () => { await dex.extensionsRemove(x.id); toast('Removed'); renderSettings('extensions'); })));
+          el('div', { className: 'item-line' },
+            x.hasOptions && x.enabled ? sBtn('Options', () => openExtOptions(x)) : null,
+            switchEl(x.enabled, async (v) => { const r = await dex.extensionsToggle(x.id, v); if (!r.ok) toast(r.error); refreshExtButton(); }),
+            sBtn('Remove', async () => { await dex.extensionsRemove(x.id); toast('Removed'); refreshExtButton(); renderSettings('extensions'); }, 'danger'))));
       }
       main.append(card);
       const idInput = el('input', { placeholder: 'Web Store link or 32-letter ID', style: 'width:280px' });

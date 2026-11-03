@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const call = (channel) => (...args) => ipcRenderer.invoke(channel, ...args);
-const EVENTS = ['open-tab', 'shortcut', 'download-update', 'blocked', 'settings-changed', 'lock', 'hosted-navigate'];
+const EVENTS = ['open-tab', 'shortcut', 'download-update', 'blocked', 'settings-changed', 'lock', 'hosted-navigate', 'ext-open-tab'];
 
 contextBridge.exposeInMainWorld('dex', {
   config: call('app:config'),
@@ -80,6 +80,10 @@ contextBridge.exposeInMainWorld('dex', {
   extensionsInstallStore: call('extensions:install-store'),
   extensionsInstallFile: call('extensions:install-file'),
   extensionsInstallUnpacked: call('extensions:install-unpacked'),
+  extensionsToggle: call('extensions:toggle'),
+  extensionsPin: call('extensions:pin'),
+  extensionsOptions: call('extensions:options'),
+  extensionsPopup: call('extensions:popup'),
   extensionsRemove: call('extensions:remove'),
 
   updateStatus: call('update:status'),

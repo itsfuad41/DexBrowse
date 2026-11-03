@@ -296,3 +296,12 @@ webview.splitfocus.paneon { box-shadow: inset 0 0 0 2px var(--accent); }
 .bmfolder { display: flex; align-items: center; gap: 8px; padding: 8px 4px 4px; font-weight: 600; color: var(--muted); }
 .bmfolder .sp { flex: 1; }
 #ctx button.sub { padding-left: 22px; }
+
+#extpins { display: inline-flex; gap: 2px; }
+#extpins .extpin img, #extpins .extpin .av { width: 20px; height: 20px; border-radius: 5px; font-size: 11px; display: grid; place-items: center; color: #fff; }
+.extrow.off { opacity: .55; }
+.extrow .extname { flex: 1; min-width: 0; text-align: left; background: none; border: 0; color: inherit; padding: 0; cursor: pointer; }
+.extrow .extpinbtn, .extrow .extmore { width: 28px; height: 28px; padding: 0; border-radius: 6px; background: none; color: var(--muted); filter: grayscale(1); opacity: .6; }
+.extrow .extpinbtn.on { filter: none; opacity: 1; }
+.extrow .extmore { filter: none; opacity: 1; font-size: 18px; }
+.extrow button:hover { background: var(--hover); }

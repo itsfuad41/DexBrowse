@@ -74,8 +74,8 @@ android {
         applicationId = "com.fuad.dexbrowse"
         minSdk = 26
         targetSdk = 34
-        versionCode = 35
-        versionName = "2.21.0"
+        versionCode = 36
+        versionName = "2.22.0"
 
         buildConfigField(
             "String",
@@ -2905,7 +2905,9 @@ document.getElementById('f').onsubmit=function(e){
 
         val cookies = cookieManager(web)
         cookies.setAcceptCookie(true)
-        cookies.setAcceptThirdPartyCookies(web, false)
+        // "I am not a robot" (reCAPTCHA, hCaptcha, Cloudflare) runs in a third-party frame and
+        // needs its cookie, otherwise the check never completes.
+        cookies.setAcceptThirdPartyCookies(web, true)
 
         applyChromiumCapabilities(web)
         web.settings.apply {

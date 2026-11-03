@@ -352,14 +352,24 @@ function activateTab(tab) {
   if (isStart(tab.url) && !panelKind) $('address').focus();
 }
 
+// stops audio/video and clears the system media control (Windows media panel) of a tab that is being closed
+function silenceTab(tab) {
+  try {
+    if (!tab.view || !tab.ready) return;
+    tab.view.setAudioMuted(true);
+    tab.view.executeJavaScript("document.querySelectorAll('video,audio').forEach(function(m){try{m.pause();m.removeAttribute('src');m.load();}catch(e){}});try{navigator.mediaSession.playbackState='none';navigator.mediaSession.metadata=null;}catch(e){}").catch(() => {});
+  } catch (_) { /* ignore */ }
+}
 function closeTab(tab) {
   const index = tabs.indexOf(tab);
   if (index < 0) return;
+  silenceTab(tab);
   if (isWeb(tab.url)) closed.push(tab.url);
   if (inSplit(tab)) split = null;
   tabs.splice(index, 1);
-  if (tab.view) tab.view.remove();
-  if (!tabs.length) { dex.windowClose(); return; } // closing the last tab closes the window, like Chrome and Brave
+  const gone = tab.view;
+  if (gone) { try { gone.loadURL('about:blank').catch(() => {}); } catch (_) { /* ignore */ } setTimeout(() => gone.remove(), 250); }
+  if (!tabs.length) { setTimeout(() => dex.windowClose(), 300); return; } // closing the last tab closes the window, like Chrome and Brave
   if (active === tab) activateTab(tabs[Math.min(index, tabs.length - 1)]);
   else { applyLayout(); renderTabs(); }
   scheduleSessionSave();
@@ -809,10 +819,56 @@ async function installFromStore(input) {
   if (r.ok) refreshExtButton();
   return r.ok;
 }
+function extIcon(x, cls) {
+  return x.icon ? el('img', { src: x.icon, alt: '', className: cls || '' }) : el('span', { className: 'av', style: 'background:#64748B' }, (x.name[0] || '?').toUpperCase());
+}
+async function openExtOptions(x) {
+  const r = await dex.extensionsOptions(x.id);
+  if (r.ok) createTab(r.data); else toast(r.error);
+}
+// like Chrome: a pinned extension shows its icon on the toolbar, click opens its popup
+async function openExtPopup(x, button) {
+  closePops();
+  if (x.hasPopup) {
+    const rect = button.getBoundingClientRect();
+    const r = await dex.extensionsPopup({ id: x.id, right: rect.right, bottom: rect.bottom });
+    if (!r.ok) toast(r.error);
+  } else if (x.hasOptions) openExtOptions(x);
+  else toast(x.name + ' has no popup');
+}
+function extMenu(x, px, py) {
+  closePops();
+  const box = $('ctx');
+  box.replaceChildren();
+  const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
+  if (x.hasOptions && x.enabled) add('Options', () => openExtOptions(x));
+  add(x.pinned ? 'Unpin from toolbar' : 'Pin to toolbar', async () => { await dex.extensionsPin(x.id, !x.pinned); refreshExtButton(); });
+  add(x.enabled ? 'Turn off' : 'Turn on', async () => { const r = await dex.extensionsToggle(x.id, !x.enabled); if (!r.ok) toast(r.error); refreshExtButton(); });
+  if (x.storeId) add('View in Chrome Web Store', () => createTab('https://chromewebstore.google.com/detail/' + x.storeId));
+  box.append(el('hr'));
+  add('Remove from DexBrowse', async () => { await dex.extensionsRemove(x.id); toast('Removed ' + x.name); refreshExtButton(); });
+  box.style.left = Math.max(4, Math.min(px, innerWidth - 230)) + 'px';
+  box.style.top = py + 'px';
+  box.hidden = false;
+}
+function renderExtPins(list) {
+  const box = $('extpins');
+  box.replaceChildren();
+  for (const x of list) {
+    if (!x.enabled || !x.pinned) continue;
+    const b = el('button', { className: 'icon extpin', title: x.name });
+    b.append(extIcon(x));
+    b.addEventListener('click', () => openExtPopup(x, b));
+    b.addEventListener('contextmenu', (e) => { e.preventDefault(); extMenu(x, e.clientX, e.clientY + 8); });
+    box.append(b);
+  }
+}
 async function refreshExtButton() {
   const r = await dex.extensionsList();
-  $('extbtn').classList.toggle('has', r.ok && r.data.length > 0);
-  return r.ok ? r.data : [];
+  const list = r.ok ? r.data : [];
+  $('extbtn').classList.toggle('has', list.length > 0);
+  renderExtPins(list);
+  return list;
 }
 async function showExtensions() {
   const pop = $('ext-pop');
@@ -823,17 +879,19 @@ async function showExtensions() {
   pop.replaceChildren(el('b', { style: 'display:block;padding:2px 4px 6px' }, 'Extensions'));
   if (!list.length) pop.append(el('div', { className: 'extnote' }, 'No extensions yet. Browse the Chrome Web Store and press “Add to DexBrowse”.'));
   for (const x of list) {
-    pop.append(el('div', { className: 'extrow' },
-      x.icon ? el('img', { src: x.icon, alt: '' }) : el('span', { className: 'av', style: 'background:#64748B' }, (x.name[0] || '?').toUpperCase()),
-      el('div', { className: 't' }, el('b', {}, x.name), el('span', {}, 'v' + x.version)),
-      el('button', { onclick: async () => { await dex.extensionsRemove(x.id); toast('Removed ' + x.name); showExtensions(); showExtensions(); refreshExtButton(); } }, 'Remove')));
+    const row = el('div', { className: 'extrow' + (x.enabled ? '' : ' off') },
+      extIcon(x),
+      el('button', { className: 't extname', title: x.hasPopup ? 'Open' : x.name, onclick: (e) => { if (x.enabled) openExtPopup(x, e.currentTarget); } }, el('b', {}, x.name), el('span', {}, x.enabled ? 'v' + x.version : 'Turned off')),
+      el('button', { className: 'extpinbtn' + (x.pinned ? ' on' : ''), title: x.pinned ? 'Unpin from toolbar' : 'Pin to toolbar', onclick: async () => { await dex.extensionsPin(x.id, !x.pinned); await refreshExtButton(); showExtensions(); showExtensions(); } }, '📌'),
+      el('button', { className: 'extmore', title: 'More', onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); extMenu(x, r.left - 160, r.bottom); } }, '⋮'));
+    pop.append(row);
   }
   pop.append(el('hr'));
   pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); createTab('https://chromewebstore.google.com/'); } }, 'Open Chrome Web Store'));
   if (extBarId) pop.append(el('button', { className: 'pitem', onclick: () => { closePops(); installFromStore(extBarId); } }, 'Add the extension on this page'));
   pop.append(el('button', { className: 'pitem', onclick: async () => { closePops(); const r = await dex.extensionsInstallFile(); if (r.ok && r.data) { toast('Added ' + r.data.name); refreshExtButton(); } else if (!r.ok) toast(r.error); } }, 'Install from .crx / .zip file…'));
   pop.append(el('button', { className: 'pitem', onclick: async () => { closePops(); const r = await dex.extensionsInstallUnpacked(); if (r.ok && r.data) { toast('Loaded ' + r.data.name); refreshExtButton(); } else if (!r.ok) toast(r.error); } }, 'Load unpacked folder…'));
-  pop.append(el('div', { className: 'extnote' }, 'DexBrowse runs on Electron, which supports many but not all Chrome extension APIs. Content-script extensions (dark mode, ad/cookie tools, page tweaks) work best; toolbar popups are not shown.'));
+  pop.append(el('div', { className: 'extnote' }, 'DexBrowse runs on Electron, which supports many but not all Chrome extension APIs. Pinned extensions show on the toolbar; click one to open its popup.'));
   pop.hidden = false;
 }
 
@@ -1091,6 +1149,7 @@ async function boot() {
 
   dex.on('shortcut', perform);
   dex.on('open-tab', (url) => createTab(url));
+  dex.on('ext-open-tab', (url) => createTab(url));
   dex.on('blocked', ({ id, count }) => {
     pendingBlocked.set(id, count);
     const t = tabs.find((x) => x.wcId === id);

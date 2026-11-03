@@ -996,6 +996,54 @@ handle('extensions:install-unpacked', async (ctx) => {
   return extensions.installUnpacked(filePaths[0]);
 });
 handle('extensions:remove', (_ctx, id) => extensions.remove(id));
+handle('extensions:toggle', (_ctx, id, on) => extensions.setEnabled(id, !!on));
+handle('extensions:pin', (_ctx, id, on) => extensions.setPinned(id, !!on));
+// the extension's own page (options) opens as a normal tab
+handle('extensions:options', (_ctx, id) => {
+  const e = extensions.find(id);
+  if (!e || !e.runtimeId || e.disabled) throw new Error('This extension is turned off');
+  if (!e.options) throw new Error('This extension has no options page');
+  return `chrome-extension://${e.runtimeId}/${e.options}`;
+});
+// toolbar popup, like Chrome: a small frameless window under the extension button that closes when you click away
+let extPopup = null;
+handle('extensions:popup', async (ctx, { id, right, bottom }) => {
+  if (ctx.priv) throw new Error('Extensions are not available in private windows');
+  const e = extensions.find(id);
+  if (!e || !e.runtimeId || e.disabled) throw new Error('This extension is turned off');
+  if (!e.popup) throw new Error(e.name + ' has no popup');
+  if (extPopup && !extPopup.isDestroyed()) extPopup.close();
+  const host = ctx.win;
+  const pop = new BrowserWindow({
+    parent: host || undefined, width: 360, height: 200, show: false, frame: false, resizable: false, skipTaskbar: true,
+    minimizable: false, maximizable: false, backgroundColor: '#ffffff',
+    webPreferences: { session: session.fromPartition(PARTITION), sandbox: true, contextIsolation: true }
+  });
+  extPopup = pop;
+  pop.removeMenu();
+  pop.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url) && host && !host.isDestroyed()) host.webContents.send('ext-open-tab', url);
+    return { action: 'deny' };
+  });
+  pop.on('blur', () => { if (!pop.isDestroyed()) pop.close(); });
+  pop.on('closed', () => { if (extPopup === pop) extPopup = null; });
+  const place = async () => {
+    if (pop.isDestroyed()) return;
+    let w = 360; let h = 200;
+    try {
+      const size = await pop.webContents.executeJavaScript('({w:Math.max(document.documentElement.scrollWidth,document.body?document.body.scrollWidth:0),h:Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0)})');
+      w = Math.min(800, Math.max(120, size.w)); h = Math.min(600, Math.max(60, size.h));
+    } catch (_) { /* keep default */ }
+    const b = host && !host.isDestroyed() ? host.getContentBounds() : { x: 100, y: 100 };
+    pop.setContentSize(w, h);
+    pop.setPosition(Math.max(b.x, Math.round(b.x + right - w)), Math.round(b.y + bottom + 4));
+    pop.show();
+    pop.focus();
+  };
+  pop.webContents.once('did-finish-load', () => setTimeout(place, 250));
+  pop.loadURL(`chrome-extension://${e.runtimeId}/${e.popup}`).catch(() => { if (!pop.isDestroyed()) pop.close(); });
+  return true;
+});
 
 // profiles: a window only ever manages its OWN profile; other profiles are reached by typing their passcode
 const spawnSelf = (extra = []) => {
@@ -1202,6 +1250,15 @@ function createWindow(priv = false) {
     return { action: 'deny' };
   });
   wireShortcuts(win.webContents);
+  win.on('close', () => {
+    for (const wc of webContents.getAllWebContents()) {
+      if (wc.hostWebContents !== win.webContents) continue;
+      try {
+        wc.setAudioMuted(true);
+        wc.executeJavaScript("document.querySelectorAll('video,audio').forEach(function(m){try{m.pause();m.removeAttribute('src');m.load();}catch(e){}});try{navigator.mediaSession.playbackState='none';navigator.mediaSession.metadata=null;}catch(e){}").catch(() => {});
+      } catch (_) { /* ignore */ }
+    }
+  });
   win.loadFile(path.join(__dirname, 'ui', 'index.html'), { query: priv ? { private: '1' } : {} });
   win.on('closed', () => {
     wins.delete(id);
@@ -1424,6 +1481,10 @@ if (!gotLock) {
   });
   app.on('window-all-closed', () => {
     if (launcherWin) return;
-    if (process.platform !== 'darwin') app.quit();
+    if (process.platform !== 'darwin') {
+      app.quit();
+      // if anything keeps the process alive, end it: a lingering process leaves a media control in the Windows panel
+      setTimeout(() => app.exit(0), 3000);
+    }
   });
 }
