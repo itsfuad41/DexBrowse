@@ -74,8 +74,8 @@ android {
         applicationId = "com.fuad.dexbrowse"
         minSdk = 26
         targetSdk = 34
-        versionCode = 36
-        versionName = "2.22.0"
+        versionCode = 37
+        versionName = "2.23.0"
 
         buildConfigField(
             "String",
@@ -3277,6 +3277,16 @@ document.getElementById('f').onsubmit=function(e){
         toast("Page zoom: $targetZoom%")
     }
 
+    private fun moveTab(from: Int, to: Int) {
+        if (from !in tabs.indices || to !in tabs.indices) return
+        val activeRef = current()
+        val moved = tabs.removeAt(from)
+        tabs.add(to, moved)
+        activeTab = tabs.indexOf(activeRef).coerceAtLeast(0)
+        renderTabs()
+        persistSession()
+    }
+
     private fun showTabs() {
         if (tabs.isEmpty()) return
         val list = LinearLayout(this).apply {
@@ -3290,6 +3300,17 @@ document.getElementById('f').onsubmit=function(e){
             .setTitle("Open tabs")
             .setView(scroller)
             .setPositiveButton("New tab") { _, _ -> addTab() }
+            .setNeutralButton("Close all") { _, _ ->
+                splitA = null
+                splitB = null
+                for (index in tabs.indices.reversed()) {
+                    val tab = tabs.removeAt(index)
+                    (tab.web.parent as? ViewGroup)?.removeView(tab.web)
+                    tab.web.destroy()
+                }
+                activeTab = -1
+                addTab()
+            }
             .setNegativeButton("Done", null)
             .show()
 
@@ -3313,6 +3334,35 @@ document.getElementById('f').onsubmit=function(e){
                 }
             }
             row.addView(title, LinearLayout.LayoutParams(0, wrapC, 1f))
+            // rearrange tabs: move up / move down
+            row.addView(TextView(this).apply {
+                text = "▲"
+                textSize = 16f
+                setTextColor(if (index > 0) foregroundColor else muted)
+                setContentDescription("Move tab up")
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                setOnClickListener {
+                    if (index > 0) {
+                        moveTab(index, index - 1)
+                        prompt.dismiss()
+                        showTabs()
+                    }
+                }
+            })
+            row.addView(TextView(this).apply {
+                text = "▼"
+                textSize = 16f
+                setTextColor(if (index < tabs.lastIndex) foregroundColor else muted)
+                setContentDescription("Move tab down")
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                setOnClickListener {
+                    if (index < tabs.lastIndex) {
+                        moveTab(index, index + 1)
+                        prompt.dismiss()
+                        showTabs()
+                    }
+                }
+            })
             row.addView(TextView(this).apply {
                 text = "✕"
                 textSize = 18f

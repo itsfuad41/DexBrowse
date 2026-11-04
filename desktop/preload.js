@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('dex', {
   loginsUpdate: call('logins:update'),
   loginsAudit: call('logins:audit'),
   loginsGenerate: call('logins:generate'),
+  loginsExport: call('logins:export'),
   loginsNever: call('logins:never'),
   loginsNeverAdd: call('logins:never-add'),
   loginsNeverRemove: call('logins:never-remove'),

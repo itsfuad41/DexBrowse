@@ -867,6 +867,22 @@ handle('logins:audit', () => {
   }
   return { reused: [...seen.values()].filter((a) => a.length > 1).flat(), weak };
 });
+handle('logins:export', async (ctx) => {
+  needUnlock();
+  if (ctx.priv) throw new Error('Not available in a private window');
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is not available on this system');
+  const { canceled, filePath } = await dialog.showSaveDialog(ctx.win || undefined, {
+    title: 'Export passwords (the file is NOT encrypted)',
+    defaultPath: path.join(app.getPath('documents'), 'DexBrowse-passwords.csv'), filters: [{ name: 'CSV', extensions: ['csv'] }]
+  });
+  if (canceled || !filePath) return null;
+  const q = (v) => '"' + String(v).replace(/"/g, '""') + '"';
+  const rows = ['name,url,username,password'];
+  for (const l of logins) { try { rows.push([hostOfUrl(l.origin), l.origin, l.username, decryptLogin(l)].map(q).join(',')); } catch (_) { /* skip unreadable */ } }
+  fs.writeFileSync(filePath, rows.join('\r\n') + '\r\n');
+  return filePath;
+});
+const hostOfUrl = (u) => { try { return new URL(u).hostname; } catch (_) { return u; } };
 handle('logins:generate', () => {
   const sets = ['abcdefghijkmnopqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*-_?'];
   const all = sets.join('');

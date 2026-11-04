@@ -157,8 +157,11 @@ async function renderSettings(section) {
       else {
         const summary = el('div', { className: 'pwsum' },
           el('span', { className: 'chip' }, `${all.length} saved`),
-          reused.size ? el('span', { className: 'chip warn' }, `${reused.size} reused`) : null,
-          weak.size ? el('span', { className: 'chip bad' }, `${weak.size} weak`) : (all.length ? el('span', { className: 'chip ok' }, 'No weak passwords') : null));
+          reused.size ? el('button', { className: 'chip warn', onclick: () => { filter = filter === 'reused' ? 'all' : 'reused'; draw(); } }, `${reused.size} reused`) : null,
+          weak.size ? el('button', { className: 'chip bad', onclick: () => { filter = filter === 'weak' ? 'all' : 'weak'; draw(); } }, `${weak.size} weak`) : (all.length ? el('span', { className: 'chip ok' }, 'No weak passwords') : null),
+          el('span', { style: 'flex:1' }),
+          sBtn('Import', async () => { const r = await dex.importFile('passwords'); if (r.ok && r.data) { toast(`Imported ${r.data.passwords} passwords`); renderSettings('passwords'); } else if (!r.ok) toast(r.error); }),
+          sBtn('Export', async () => { const r = await dex.loginsExport(); if (r.ok && r.data) toast('Saved to ' + r.data); else if (!r.ok) toast(r.error); }));
         const search = el('input', { type: 'search', className: 'pwsearch', placeholder: 'Search sites and usernames' });
         const addBtn = sBtn('Add password', () => openForm(null), 'primary');
         card.append(el('div', { className: 'pwtools' }, search, addBtn), summary);
@@ -184,33 +187,43 @@ async function renderSettings(section) {
           (item ? user : site).focus();
         };
 
+        let filter = 'all';
         const draw = () => {
           list.innerHTML = '';
           const q = search.value.trim().toLowerCase();
-          const shown = all.filter((l) => !q || hostOf(l.origin).toLowerCase().includes(q) || (l.username || '').toLowerCase().includes(q));
-          if (!shown.length) { list.append(el('div', { className: 'msg' }, all.length ? 'Nothing matches your search.' : 'No saved passwords yet. Sign in to a site and choose Save, or add one here.')); return; }
-          const groups = new Map();
-          for (const l of shown) { const h = hostOf(l.origin); if (!groups.has(h)) groups.set(h, []); groups.get(h).push(l); }
-          for (const [host, items] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
-            const g = el('div', { className: 'pwgroup' });
-            g.append(el('div', { className: 'pwsite' }, el('span', { className: 'pwav' }, host.replace(/^www\./, '')[0].toUpperCase()), el('b', {}, host), el('span', { className: 'pwcount' }, items.length > 1 ? `${items.length} accounts` : '')));
-            for (const l of items) {
-              const shownPw = el('code', {}, '••••••••');
-              g.append(el('div', { className: 'pwrow' },
-                el('div', { className: 'pwwho' }, el('span', {}, l.username || '(no username)'),
-                  reused.has(l.id) ? el('span', { className: 'chip warn' }, 'Reused') : null,
-                  weak.has(l.id) ? el('span', { className: 'chip bad' }, 'Weak') : null),
-                el('div', { className: 'item-line' }, shownPw,
-                  sBtn('Show', async (e) => {
-                    if (shownPw.dataset.on) { shownPw.textContent = '••••••••'; delete shownPw.dataset.on; e.target.textContent = 'Show'; return; }
-                    const r = await dex.loginsReveal(l.id);
-                    if (r.ok) { shownPw.textContent = r.data; shownPw.dataset.on = '1'; e.target.textContent = 'Hide'; } else toast(r.error);
-                  }),
-                  sBtn('Copy', async () => { const r = await dex.loginsReveal(l.id); if (r.ok) { await navigator.clipboard.writeText(r.data).catch(() => {}); toast('Password copied'); } }),
-                  sBtn('Edit', () => openForm(l)),
-                  sBtn('Delete', async () => { await dex.loginsDelete(l.id); renderSettings('passwords'); }, 'danger'))));
-            }
-            list.append(g);
+          const shown = all.filter((l) => (!q || hostOf(l.origin).toLowerCase().includes(q) || (l.username || '').toLowerCase().includes(q))
+            && (filter === 'all' || (filter === 'reused' && reused.has(l.id)) || (filter === 'weak' && weak.has(l.id))))
+            .sort((a, b) => hostOf(a.origin).localeCompare(hostOf(b.origin)));
+          if (!shown.length) { list.append(el('div', { className: 'msg' }, all.length ? 'Nothing matches.' : 'No saved passwords yet. Sign in to a site and choose Save, or add one here.')); return; }
+          list.append(el('div', { className: 'pwhead' }, el('span', {}, 'Website'), el('span', {}, 'Username'), el('span', {}, 'Password'), el('span', {})));
+          for (const l of shown) {
+            const dots = el('span', { className: 'pwdots' }, '••••••••••');
+            const eye = el('button', { className: 'b pweye', title: 'Show password' }, '👁');
+            eye.addEventListener('click', async () => {
+              if (dots.dataset.on) { dots.textContent = '••••••••••'; delete dots.dataset.on; return; }
+              const r = await dex.loginsReveal(l.id);
+              if (r.ok) { dots.textContent = r.data; dots.dataset.on = '1'; } else toast(r.error);
+            });
+            const more = el('button', { className: 'b pwmore', title: 'More actions' }, '⋮');
+            more.addEventListener('click', (e) => {
+              const box = $('ctx');
+              const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
+              closePops(); box.replaceChildren();
+              add('Copy password', async () => { const r = await dex.loginsReveal(l.id); if (r.ok) { await navigator.clipboard.writeText(r.data).catch(() => {}); toast('Password copied'); } });
+              add('Copy username', async () => { await navigator.clipboard.writeText(l.username || '').catch(() => {}); toast('Username copied'); });
+              add('Edit', () => openForm(l));
+              add('Open site', () => createTab(l.origin));
+              box.append(el('hr'));
+              add('Remove', async () => { await dex.loginsDelete(l.id); renderSettings('passwords'); });
+              const r = e.currentTarget.getBoundingClientRect();
+              box.style.left = Math.max(4, r.right - 190) + 'px'; box.style.top = r.bottom + 4 + 'px'; box.hidden = false;
+            });
+            list.append(el('div', { className: 'pwrow2' },
+              el('span', { className: 'pwsite2' }, el('span', { className: 'pwav' }, hostOf(l.origin).replace(/^www\./, '')[0].toUpperCase()), el('span', { className: 'pwhost' }, hostOf(l.origin)),
+                reused.has(l.id) ? el('span', { className: 'chip warn' }, 'Reused') : null, weak.has(l.id) ? el('span', { className: 'chip bad' }, 'Weak') : null),
+              el('span', { className: 'pwuser' }, l.username || '—'),
+              el('span', { className: 'pwpass' }, dots, eye),
+              more));
           }
         };
         search.addEventListener('input', draw);

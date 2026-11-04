@@ -155,3 +155,8 @@ Brought the PC features to the Android app: Brave-style bookmarks with folders a
 - PC: extensions work like Chrome. Pinned extensions show on the toolbar and open their popup, options pages open in a tab, extensions can be pinned, turned off/on and removed from the puzzle menu or the toolbar icon's right-click menu.
 - PC: closing a tab stops its audio/video and the window ends its process, so no media control stays in the Windows media panel.
 - Android: "I am not a robot" checks now complete (third-party cookies are accepted).
+
+### 2.23.0
+- PC: drag tabs to rearrange them (pinned and normal tabs stay in their own groups); more tab menu entries (new tab to the right, close tabs to the right, reopen closed tab).
+- PC: Brave-style password list (Website / Username / Password columns, eye icon, ⋮ menu, filter by reused/weak, Import and Export CSV).
+- Android: move tabs up/down in the tab list, Close all tabs.

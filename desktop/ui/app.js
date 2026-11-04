@@ -383,6 +383,7 @@ function togglePin(tab) {
   renderTabs();
 }
 
+let dragTab = null;
 function renderTabs() {
   const strip = $('tabs');
   strip.replaceChildren();
@@ -405,6 +406,29 @@ function renderTabs() {
       close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tab); });
       node.append(close);
     }
+    node.draggable = true;
+    node.addEventListener('dragstart', (e) => { dragTab = tab; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', tab.title); setTimeout(() => node.classList.add('dragging'), 0); });
+    node.addEventListener('dragend', () => { dragTab = null; strip.querySelectorAll('.dragging,.dropl,.dropr').forEach((n) => n.classList.remove('dragging', 'dropl', 'dropr')); });
+    node.addEventListener('dragover', (e) => {
+      if (!dragTab || dragTab === tab || dragTab.pinned !== tab.pinned) return;
+      e.preventDefault();
+      const r = node.getBoundingClientRect();
+      const left = e.clientX < r.left + r.width / 2;
+      strip.querySelectorAll('.dropl,.dropr').forEach((n) => n.classList.remove('dropl', 'dropr'));
+      node.classList.add(left ? 'dropl' : 'dropr');
+    });
+    node.addEventListener('drop', (e) => {
+      if (!dragTab || dragTab === tab || dragTab.pinned !== tab.pinned) return;
+      e.preventDefault();
+      const r = node.getBoundingClientRect();
+      const left = e.clientX < r.left + r.width / 2;
+      const moving = dragTab;
+      tabs.splice(tabs.indexOf(moving), 1);
+      tabs.splice(tabs.indexOf(tab) + (left ? 0 : 1), 0, moving);
+      dragTab = null;
+      renderTabs();
+      scheduleSessionSave();
+    });
     node.addEventListener('click', () => activateTab(tab));
     node.addEventListener('auxclick', (e) => { if (e.button === 1 && !tab.pinned) closeTab(tab); });
     node.addEventListener('contextmenu', (e) => { e.preventDefault(); showTabMenu(tab, e.clientX, e.clientY); });
@@ -434,6 +458,7 @@ function showTabMenu(tab, x, y) {
   box.replaceChildren();
   const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
   add('Reload', () => tab.ready && tab.view.reload());
+  add('New tab to the right', () => { const t = createTab(undefined, true); tabs.splice(tabs.indexOf(t), 1); tabs.splice(tabs.indexOf(tab) + 1, 0, t); renderTabs(); });
   add('Duplicate', () => createTab(isStart(tab.url) ? 'dex://start' : tab.url));
   if (inSplit(tab)) { add('Exit split view', endSplit); add('Swap split sides', swapSplit); }
   else if (!tab.pinned) add('Split view', () => startSplit(tab));
@@ -441,7 +466,9 @@ function showTabMenu(tab, x, y) {
   add(tab.muted ? 'Unmute site' : 'Mute site', () => toggleMute(tab));
   box.append(el('hr'));
   if (!tab.pinned) add('Close tab', () => closeTab(tab));
+  add('Close tabs to the right', () => { const at = tabs.indexOf(tab); for (const t of tabs.slice(at + 1)) if (!t.pinned) closeTab(t); });
   add('Close other tabs', () => { for (const t of [...tabs]) if (t !== tab && !t.pinned) closeTab(t); });
+  if (closed.length) add('Reopen closed tab', () => perform('reopen-tab'));
   box.style.left = Math.min(x, innerWidth - 200) + 'px';
   box.style.top = Math.min(y, innerHeight - 220) + 'px';
   box.hidden = false;
