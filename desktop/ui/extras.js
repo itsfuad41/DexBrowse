@@ -209,7 +209,7 @@ function bookmarkMenu(b, x, y) {
   box.append(el('hr'));
   add('Add page…', () => editBookmark(null));
   add('Add folder…', () => promptFolder('bar'));
-  add('Bookmark manager', () => showLibrary('bookmarks'));
+  add('Bookmark manager', () => openBookmarkManager());
   box.append(el('hr'));
   barToggleItems(add);
   placeMenu(box, x, y);
@@ -304,10 +304,146 @@ function initExtras() {
       const add = (label, fn) => box.append(el('button', { onclick: () => { closePops(); fn(); } }, label));
       add('Add page…', () => editBookmark(null));
       add('Add folder…', () => promptFolder('bar'));
-      add('Bookmark manager', () => showLibrary('bookmarks'));
+      add('Bookmark manager', () => openBookmarkManager());
       box.append(el('hr'));
       barToggleItems(add);
       placeMenu(box, ev.clientX, ev.clientY);
     }
   });
 }
+
+
+// ---------- bookmark manager: full page, folders on the left, list on the right (like brave://bookmarks) ----------
+const bmView = { folder: 'all', sort: 'manual', q: '', sel: new Set() };
+const AVATAR_COLORS = ['#F97316', '#0EA5E9', '#22C55E', '#A855F7', '#EF4444', '#EAB308', '#14B8A6', '#EC4899'];
+const avatarColor = (s) => AVATAR_COLORS[[...s].reduce((n, c) => n + c.charCodeAt(0), 0) % AVATAR_COLORS.length];
+function openBookmarkManager() {
+  closePops();
+  closePanel();
+  bmView.sel.clear();
+  $('bmmgr').hidden = false;
+  paintManager();
+}
+function closeBookmarkManager() { $('bmmgr').hidden = true; }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('bmmgr').hidden && $('bmpop').hidden && $('editdlg').hidden) closeBookmarkManager(); });
+async function applyManagerResult(r) {
+  if (!r.ok) { toast(r.error); return; }
+  if (Array.isArray(r.data)) bookmarks = r.data;
+  else if (r.data && r.data.bookmarks) { bookmarks = r.data.bookmarks; bmFolders = r.data.folders; }
+  renderBookmarkBar();
+  updateToolbar();
+  paintManager();
+}
+async function moveBookmarks(ids, folder) {
+  let r = { ok: true, data: bookmarks };
+  for (const id of ids) { r = await dex.bookmarksUpdate(id, { folder }); if (!r.ok) break; }
+  bmView.sel.clear();
+  await applyManagerResult(r);
+  if (r.ok) toast(ids.length === 1 ? 'Moved' : `Moved ${ids.length} bookmarks`);
+}
+function paintManager() {
+  const box = $('bmmgr');
+  const counts = (id) => (id === 'all' ? bookmarks.length : bookmarks.filter((b) => barOf(b) === id).length);
+  const folderName = (id) => (folderOptions().find(([v]) => v === id) || ['', 'Bookmarks bar'])[1].replace(/^.* \/ /, '');
+
+  // ----- left: folders -----
+  const side = el('aside', { className: 'bmside' });
+  const nav = (id, icon, label, sub, folder) => {
+    const n = el('div', { className: 'bmnav' + (bmView.folder === id ? ' on' : '') + (sub ? ' sub' : '') },
+      el('span', { className: 'bmi' }, icon), el('span', { className: 'bml' }, label), el('span', { className: 'bmc' }, String(counts(id))));
+    n.addEventListener('click', () => { bmView.folder = id; bmView.sel.clear(); paintManager(); });
+    if (id !== 'all') {
+      n.addEventListener('dragover', (ev) => { if (dragBm) { ev.preventDefault(); n.classList.add('drop'); } });
+      n.addEventListener('dragleave', () => n.classList.remove('drop'));
+      n.addEventListener('drop', (ev) => { ev.preventDefault(); n.classList.remove('drop'); if (dragBm) moveBookmarks(bmView.sel.has(dragBm) ? [...bmView.sel] : [dragBm], id); });
+    }
+    if (folder) {
+      const more = el('button', { className: 'bmmore', title: 'Folder options' }, '⋮');
+      more.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        closePops();
+        const ctx = $('ctx');
+        ctx.replaceChildren(
+          el('button', { onclick: () => { closePops(); promptFolder(folder.parent, () => paintManager(), folder); } }, 'Rename'),
+          el('button', { onclick: async () => { closePops(); const r = await dex.bmFolderRemove(folder.id); if (bmView.folder === folder.id) bmView.folder = 'all'; await applyManagerResult(r); } }, 'Delete folder'));
+        const rc = more.getBoundingClientRect();
+        ctx.style.left = rc.left + 'px'; ctx.style.top = rc.bottom + 2 + 'px'; ctx.hidden = false;
+      });
+      n.append(more);
+    }
+    return n;
+  };
+  side.append(el('div', { className: 'bmtitle' }, 'Bookmarks'),
+    nav('all', '★', 'All bookmarks'), nav('bar', '▭', 'Bookmarks bar'));
+  for (const f of bmFolders.filter((x) => x.parent === 'bar')) side.append(nav(f.id, '📁', f.name, true, f));
+  side.append(nav('other', '🗂', 'Other bookmarks'));
+  for (const f of bmFolders.filter((x) => x.parent === 'other')) side.append(nav(f.id, '📁', f.name, true, f));
+  side.append(el('button', { className: 'bmnewf', onclick: () => promptFolder('bar', () => paintManager()) }, '＋ New folder'));
+
+  // ----- right: list -----
+  const main = el('section', { className: 'bmmain' });
+  const search = el('input', { type: 'search', className: 'bmsearch', placeholder: 'Search bookmarks', value: bmView.q });
+  const sort = el('select', { className: 'bmsort' },
+    el('option', { value: 'manual', selected: bmView.sort === 'manual' }, 'Manual order'),
+    el('option', { value: 'name', selected: bmView.sort === 'name' }, 'Name A–Z'),
+    el('option', { value: 'new', selected: bmView.sort === 'new' }, 'Newest first'));
+  sort.addEventListener('change', () => { bmView.sort = sort.value; paintManager(); });
+  const addAllTabs = async () => {
+    const open = tabs.filter((t) => isWeb(t.url));
+    if (!open.length) { toast('No web pages open'); return; }
+    await applyManagerResult(await dex.bmAddMany({ name: 'Saved tabs ' + new Date().toLocaleDateString(), items: open.map((t) => ({ title: t.title, url: t.url })) }));
+  };
+  const bar = el('div', { className: 'bmtools' }, search, sort,
+    el('button', { className: 'primary', onclick: () => editBookmark(null) }, '＋ Add page'),
+    el('button', { onclick: addAllTabs }, 'Bookmark all tabs'),
+    el('button', { onclick: async () => { const r = await dex.importFile('bookmarks'); if (r.ok && r.data) { toast(`Imported ${r.data.bookmarks} bookmarks`); await refreshBookmarks(); paintManager(); } else if (!r.ok) toast(r.error); } }, 'Import'),
+    el('button', { onclick: async () => { const r = await dex.bmExport(); if (r.ok && r.data) toast('Saved to ' + r.data); else if (!r.ok) toast(r.error); } }, 'Export'),
+    el('button', { className: 'bmclose', title: 'Close (Esc)', onclick: closeBookmarkManager }, '✕'));
+  main.append(bar);
+
+  let rows = bookmarks.filter((b) => bmView.folder === 'all' || barOf(b) === bmView.folder);
+  const q = bmView.q.trim().toLowerCase();
+  if (q) rows = rows.filter((b) => (b.title || '').toLowerCase().includes(q) || (b.url || '').toLowerCase().includes(q));
+  if (bmView.sort === 'name') rows = [...rows].sort((x, y) => (x.title || '').localeCompare(y.title || ''));
+  if (bmView.sort === 'new') rows = [...rows].reverse();
+
+  main.append(el('div', { className: 'bmcrumb' }, (bmView.folder === 'all' ? 'All bookmarks' : folderName(bmView.folder)) + ` · ${rows.length}`));
+  const sel = bmView.sel;
+  if (sel.size) {
+    const move = el('select', {}, el('option', { value: '' }, 'Move to…'), ...folderOptions().map(([v, l]) => el('option', { value: v }, l)));
+    move.addEventListener('change', () => { if (move.value) moveBookmarks([...sel], move.value); });
+    main.append(el('div', { className: 'bmbulk' }, el('b', {}, `${sel.size} selected`), move,
+      el('button', { onclick: async () => { let r = { ok: true }; for (const id of [...sel]) { r = await dex.bookmarksRemove(id); if (!r.ok) break; } sel.clear(); await applyManagerResult(r); } }, 'Delete'),
+      el('button', { onclick: () => { sel.clear(); paintManager(); } }, 'Clear')));
+  }
+  const list = el('div', { className: 'bmlist' });
+  if (!rows.length) {
+    list.append(el('div', { className: 'bmempty' }, el('div', { className: 'big' }, '★'),
+      el('b', {}, q ? 'No bookmarks match your search' : 'No bookmarks here yet'),
+      el('span', {}, q ? 'Try a different word.' : 'Press the star in the address bar on any page, drag bookmarks here, or import them from another browser.')));
+  }
+  for (const b of rows) {
+    const host = (() => { try { return new URL(b.url).hostname.replace(/^www\./, ''); } catch (_) { return b.url; } })();
+    const check = el('input', { type: 'checkbox', checked: sel.has(b.id) });
+    check.addEventListener('click', (ev) => ev.stopPropagation());
+    check.addEventListener('change', () => { if (check.checked) sel.add(b.id); else sel.delete(b.id); paintManager(); });
+    const row = el('div', { className: 'bmrow' + (sel.has(b.id) ? ' sel' : ''), draggable: true },
+      check,
+      el('span', { className: 'bmav', style: `background:${avatarColor(host)}` }, (host[0] || '?').toUpperCase()),
+      el('div', { className: 'bmtext' }, el('b', {}, b.title || host), el('span', {}, b.url)),
+      bmView.folder === 'all' ? el('span', { className: 'chip' }, folderName(barOf(b))) : null,
+      el('div', { className: 'bmacts' },
+        el('button', { title: 'Open in new tab', onclick: (ev) => { ev.stopPropagation(); closeBookmarkManager(); createTab(b.url); } }, '↗'),
+        el('button', { title: 'Edit', onclick: (ev) => { ev.stopPropagation(); editBookmark(b); } }, '✎'),
+        el('button', { title: 'Delete', onclick: async (ev) => { ev.stopPropagation(); sel.delete(b.id); await applyManagerResult(await dex.bookmarksRemove(b.id)); } }, '🗑')));
+    row.addEventListener('click', () => { closeBookmarkManager(); go(b.url); });
+    row.addEventListener('contextmenu', (ev) => { ev.preventDefault(); bookmarkMenu(b, ev.clientX, ev.clientY); });
+    row.addEventListener('dragstart', (ev) => { dragBm = b.id; ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', b.url); });
+    row.addEventListener('dragend', () => { dragBm = null; });
+    list.append(row);
+  }
+  main.append(list);
+  search.addEventListener('input', () => { bmView.q = search.value; const at = search.selectionStart; paintManager(); const s = $('bmmgr').querySelector('.bmsearch'); s.focus(); s.setSelectionRange(at, at); });
+  box.replaceChildren(side, main);
+}
+let dragBm = null;

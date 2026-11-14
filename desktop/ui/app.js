@@ -518,7 +518,7 @@ function openInternal(name) {
     case 'passwords': openSettings('passwords'); break;
     case 'shields': openSettings('shields'); break;
     case 'history': showLibrary('history'); break;
-    case 'bookmarks': showLibrary('bookmarks'); break;
+    case 'bookmarks': openBookmarkManager(); break;
     case 'downloads': showLibrary('downloads'); break;
     case 'extensions': openSettings('extensions'); break;
     case 'import': openSettings('import'); break;
@@ -585,7 +585,7 @@ async function showLibrary(which) {
   const body = openPanel('library', 'Library');
   const seg = el('div', { className: 'seg' });
   for (const [id, label] of [['history', 'History'], ['cloud', 'Synced'], ['bookmarks', 'Bookmarks'], ['reading', 'Reading list'], ['downloads', 'Downloads']]) {
-    seg.append(el('button', { className: libTab === id ? 'on' : '', onclick: () => showLibrary(id) }, label));
+    seg.append(el('button', { className: libTab === id ? 'on' : '', onclick: () => (id === 'bookmarks' ? (closePanel(), openBookmarkManager()) : showLibrary(id)) }, label));
   }
   const list = el('div');
   body.append(seg);
@@ -792,7 +792,7 @@ function showMenu() {
   item('New private window', 'Ctrl+Shift+N', () => dex.windowNew(true));
   item(split ? 'Exit split view' : 'Split view', '', () => (split ? endSplit() : active && startSplit(active)));
   menu.append(el('hr'));
-  item('Bookmarks', 'Ctrl+Shift+O', () => showLibrary('bookmarks'));
+  item('Bookmarks', 'Ctrl+Shift+O', () => openBookmarkManager());
   item(cfg.settings.bookmarksBar ? 'Hide bookmarks bar' : 'Show bookmarks bar', 'Ctrl+Shift+B', () => dex.settingsSet({ bookmarksBar: !cfg.settings.bookmarksBar }));
   item('History', 'Ctrl+H', () => showLibrary('history'));
   item('Downloads', 'Ctrl+J', () => showLibrary('downloads'));
@@ -1068,7 +1068,7 @@ function perform(action) {
   if (action === 'new-private-window') { dex.windowNew(true); return; }
   if (action === 'history') { panelKind === 'library' && libTab === 'history' ? closePanel() : showLibrary('history'); return; }
   if (action === 'downloads') { showLibrary('downloads'); return; }
-  if (action === 'bookmarks') { showLibrary('bookmarks'); return; }
+  if (action === 'bookmarks') { openBookmarkManager(); return; }
   if (action === 'reading-list') { showLibrary('reading'); return; }
   if (action === 'settings') { openSettings('appearance'); return; }
   if (action === 'clear-data') { openSettings('data'); return; }

@@ -160,3 +160,6 @@ Brought the PC features to the Android app: Brave-style bookmarks with folders a
 - PC: drag tabs to rearrange them (pinned and normal tabs stay in their own groups); more tab menu entries (new tab to the right, close tabs to the right, reopen closed tab).
 - PC: Brave-style password list (Website / Username / Password columns, eye icon, ⋮ menu, filter by reused/weak, Import and Export CSV).
 - Android: move tabs up/down in the tab list, Close all tabs.
+
+### 2.24.0
+- PC: full-page bookmark manager (folders on the left, searchable list on the right, drag or bulk-move bookmarks into folders, sort, import/export).
