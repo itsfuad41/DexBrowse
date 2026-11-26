@@ -14,6 +14,7 @@ const { createExtensions } = require('./extensions');
 const { createProfiles } = require('./profiles');
 const importer = require('./importer');
 const { createUpdater } = require('./updater');
+const media = require('./media');
 
 // Look like a normal browser to bot checks (navigator.webdriver stays false).
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
@@ -49,7 +50,7 @@ const DEVELOPER = 'Md. Fuad Hasan';
 const cleanUA = app.userAgentFallback.replace(/\s(?:Electron|dexbrowse-desktop|DexBrowse)\/\S+/gi, '');
 app.userAgentFallback = cleanUA;
 
-const userAgents = makeUserAgents(process.versions.chrome.split('.')[0]);
+const userAgents = makeUserAgents(process.versions.chrome.split('.')[0], app.getVersion(), process.platform);
 const PARTITION = 'persist:browse';
 const PRIVATE_PARTITION = 'private';
 
@@ -82,13 +83,14 @@ function writeJson(name, value) {
 }
 
 const DEFAULTS = {
-  ua: 'This browser (default)',
+  ua: 'DexBrowse (default)',
   theme: 'dark',
   engine: 'Brave Search',
   startup: 'start', // start | restore | homepage
   homepage: '',
   bookmarksBar: true,
   askDownload: false,
+  videoDetect: true,
   webrtc: true,
   autofill: true,
   savePasswords: true,
@@ -155,7 +157,7 @@ function sanitize(patch) {
   if (typeof patch.homepage === 'string') out.homepage = patch.homepage.slice(0, 500);
   if ([0, 1, 2, 5, 10, 15, 30, 60].includes(patch.autoLockMinutes)) out.autoLockMinutes = patch.autoLockMinutes;
   if (typeof patch.lockShortcut === 'string' && validLockShortcut(patch.lockShortcut)) out.lockShortcut = patch.lockShortcut;
-['bookmarksBar', 'askDownload', 'webrtc', 'autofill', 'savePasswords', 'autoUpdate', 'searchSuggest', 'memorySaver'].forEach(bool);
+['bookmarksBar', 'askDownload', 'videoDetect', 'webrtc', 'autofill', 'savePasswords', 'autoUpdate', 'searchSuggest', 'memorySaver'].forEach(bool);
   if (['always', 'newtab'].includes(patch.bookmarksBarMode)) out.bookmarksBarMode = patch.bookmarksBarMode;
   if ([5, 10, 15, 30, 60].includes(patch.sleepMinutes)) out.sleepMinutes = patch.sleepMinutes;
   if (patch.perm && typeof patch.perm === 'object') {
@@ -194,6 +196,14 @@ function broadcast(channel, data, privFilter) {
 
 // ---------- user agent ----------
 const currentUA = () => userAgents[settings.ua] || cleanUA;
+// Google's sign-in refuses browsers it does not know, so Google's own pages keep the plain Chrome identity;
+// every other site sees "DexBrowse".
+const isDexUA = () => /DexBrowse\//.test(currentUA());
+const googleHost = (h) => /(^|\.)(google\.[a-z.]+|gstatic\.com|googleusercontent\.com|googleapis\.com|youtube\.com|ytimg\.com|recaptcha\.net)$/i.test(h || '');
+const uaFor = (url) => {
+  if (isDexUA()) { try { if (googleHost(new URL(url).hostname)) return cleanUA; } catch (_) { /* ignore */ } }
+  return currentUA();
+};
 const sessions = () => [session.fromPartition(PARTITION), session.fromPartition(PRIVATE_PARTITION)];
 const hostPlatform = () => (process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux');
 const uaMeta = (ua = currentUA()) => makeUserAgents.metadataFor(ua, process.versions.chrome, hostPlatform());
@@ -217,7 +227,12 @@ function applyUAOverride(contents, ua = currentUA()) {
 }
 
 function decorateHeaders(headers, reqUrl) {
-  const meta = uaMeta();
+  const ua = uaFor(reqUrl.href);
+  const meta = uaMeta(ua);
+  if (ua !== currentUA()) {
+    for (const k of Object.keys(headers)) if (/^user-agent$/i.test(k) || /^sec-ch-ua/i.test(k)) delete headers[k];
+    headers['User-Agent'] = ua;
+  }
   if (!meta) return;
   const secure = reqUrl.protocol === 'https:' || reqUrl.hostname === 'localhost' || reqUrl.hostname === '127.0.0.1';
   if (!secure) return;
@@ -230,6 +245,7 @@ function applyUserAgent() {
     if (contents.getType() === 'webview') {
       contents.setUserAgent(currentUA(), acceptLanguages());
       applyUAOverride(contents);
+      contents.__ua = currentUA();
     }
   }
 }
@@ -309,8 +325,19 @@ ipcMain.on('perm:state', (event, origin) => {
   event.returnValue = d === true ? 'granted' : d === false ? 'denied' : 'default';
 });
 
+// videos a page loads, listed per tab so they can be downloaded
+const sniffer = media.createMediaSniffer({
+  isEnabled: () => settings.videoDetect !== false,
+  onChange: (wcId, count) => {
+    const wc = webContents.fromId(wcId);
+    const host = wc && !wc.isDestroyed() ? wc.hostWebContents : null;
+    if (host && !host.isDestroyed()) host.send('media-update', { wcId, count });
+  }
+});
+
 function setupSession(ses, priv) {
   shields.attach(ses);
+  sniffer.attach(ses);
 
   ses.setPermissionCheckHandler((_wc, permission, origin, details) => {
     if (AUTO_ALLOW.has(permission)) return true;
@@ -508,6 +535,16 @@ app.on('web-contents-created', (_event, contents) => {
   if (contents.getType() !== 'webview') return;
   contents.setUserAgent(currentUA(), acceptLanguages());
   applyUAOverride(contents);
+  contents.__ua = currentUA();
+  // follow the identity per page: Google's pages see Chrome, everything else the chosen identity
+  contents.on('did-start-navigation', (_e, url, _inPlace, isMainFrame) => {
+    if (!isMainFrame || contents.isDestroyed()) return;
+    const ua = uaFor(url);
+    if (contents.__ua === ua) return;
+    contents.__ua = ua;
+    contents.setUserAgent(ua, acceptLanguages());
+    applyUAOverride(contents, ua);
+  });
   contents.setWebRTCIPHandlingPolicy(settings.webrtc ? 'default_public_interface_only' : 'default');
   contents.on('devtools-opened', () => { // developer tools get the DexBrowse icon too, not the Electron default
     try {
@@ -741,6 +778,65 @@ handle('downloads:cancel', (_ctx, id) => {
   const item = dlItems.get(id);
   if (item) item.cancel();
   return true;
+});
+
+// ----- video detection and download -----
+handle('media:list', (_ctx, wcId) => sniffer.list(wcId).map(({ id, kind, ext, size, url, audio }) => ({ id, kind, ext, size, url, audio: !!audio })));
+const safeName = (s) => String(s || 'video').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 90) || 'video';
+const uniquePath = (name, ext) => {
+  let p = path.join(app.getPath('downloads'), `${name}.${ext}`);
+  for (let n = 1; fs.existsSync(p); n++) p = path.join(app.getPath('downloads'), `${name} (${n}).${ext}`);
+  return p;
+};
+handle('media:download', async (ctx, { wcId, id, title }) => {
+  const found = sniffer.find(wcId, id);
+  if (!found) throw new Error('This video is no longer available. Play it again and retry.');
+  const wc = webContents.fromId(wcId);
+  const priv = ctx.priv;
+  const ses = session.fromPartition(priv ? PRIVATE_PARTITION : PARTITION);
+  const pageUrl = wc && !wc.isDestroyed() ? wc.getURL() : '';
+  const headers = { Referer: pageUrl };
+  try { headers.Origin = new URL(pageUrl).origin; } catch (_) { /* ignore */ }
+  const fetchRes = (u) => ses.fetch(u, { headers, signal: ctrl.signal });
+  const ctrl = new AbortController();
+  const base = safeName(title || path.basename(new URL(found.url).pathname, path.extname(new URL(found.url).pathname)));
+  const entry = { id: ++dlSeq, name: `${base}.${found.ext}`, path: '', url: found.url, total: found.size || 0, received: 0, state: 'progressing', priv, at: Date.now() };
+  downloads.unshift(entry);
+  dlItems.set(entry.id, { cancel: () => ctrl.abort() });
+  const push = () => broadcast('download-update', entry, priv);
+  push();
+  const finish = (state) => {
+    entry.state = state;
+    dlItems.delete(entry.id);
+    push();
+    writeJson('downloads.json', downloads.filter((d) => !d.priv).slice(0, 100));
+  };
+  const progress = (got, total) => { entry.received = got; if (total) entry.total = total; if (!entry.__t || Date.now() - entry.__t > 250) { entry.__t = Date.now(); push(); } };
+  (async () => {
+    try {
+      if (found.kind === 'hls') {
+        const fetchBuf = async (u) => { const r = await fetchRes(u); if (!r.ok) throw new Error('Segment failed (' + r.status + ')'); return Buffer.from(await r.arrayBuffer()); };
+        const fetchText = async (u) => { const r = await fetchRes(u); if (!r.ok) throw new Error('Playlist failed (' + r.status + ')'); return r.text(); };
+        const out = await media.downloadHls({
+          fetchText, fetchBuf, url: found.url, signal: ctrl.signal, onProgress: progress,
+          outPathFor: (ext) => { entry.path = uniquePath(base, ext); entry.name = path.basename(entry.path); return entry.path; }
+        });
+        entry.path = out;
+        entry.received = fs.statSync(out).size;
+      } else {
+        entry.path = uniquePath(base, found.ext);
+        entry.name = path.basename(entry.path);
+        entry.received = await media.downloadFile({ fetchRes, url: found.url, outPath: entry.path, signal: ctrl.signal, onProgress: progress });
+      }
+      entry.total = entry.received;
+      finish('completed');
+    } catch (e) {
+      entry.error = ctrl.signal.aborted ? 'Cancelled' : (e && e.message) || 'Failed';
+      if (entry.path) fs.rm(entry.path, { force: true }, () => {});
+      finish(ctrl.signal.aborted ? 'cancelled' : 'interrupted');
+    }
+  })();
+  return { id: entry.id, name: entry.name };
 });
 handle('downloads:open', async (_ctx, id) => {
   const d = downloads.find((x) => x.id === id);

@@ -235,7 +235,9 @@ function showFolderDropdown(anchor, id) {
   const items = [];
   for (const f of bmFolders.filter((x) => x.parent === id)) items.push(el('button', { onclick: () => showFolderDropdown(anchor, f.id) }, '📁 ' + f.name));
   for (const b of bookmarks.filter((x) => barOf(x) === id)) {
-    const row = el('button', { title: b.url, onclick: () => { closePops(); go(b.url); } }, b.title);
+    const row = el('button', { title: b.url, draggable: true, onclick: () => { closePops(); go(b.url); } }, b.title);
+    row.addEventListener('dragstart', (e) => { dragBm = b.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', b.url); });
+    row.addEventListener('dragend', () => { dragBm = null; });
     row.addEventListener('auxclick', (e) => { if (e.button === 1) createTab(b.url); });
     row.addEventListener('contextmenu', (e) => { e.preventDefault(); bookmarkMenu(b, e.clientX, e.clientY); });
     items.push(row);
@@ -260,6 +262,7 @@ function renderBookmarkBar() {
   for (const f of barFolders) {
     const chip = el('button', { className: 'chip folder', title: f.name, onclick: (ev) => showFolderDropdown(ev.currentTarget, f.id) }, f.name);
     chip.addEventListener('contextmenu', (e) => { e.preventDefault(); folderMenu(f, e.clientX, e.clientY); });
+    makeDropTarget(chip, f.id);
     bar.append(chip);
   }
   for (const b of barItems) {
@@ -267,13 +270,15 @@ function renderBookmarkBar() {
     chip.dataset.id = b.id;
     chip.addEventListener('contextmenu', (e) => { e.preventDefault(); bookmarkMenu(b, e.clientX, e.clientY); });
     chip.addEventListener('auxclick', (e) => { if (e.button === 1) createTab(b.url); });
-    chip.addEventListener('dragstart', (e) => { dragId = b.id; e.dataTransfer.effectAllowed = 'move'; chip.classList.add('drag'); });
-    chip.addEventListener('dragend', () => { dragId = null; chip.classList.remove('drag'); });
+    chip.addEventListener('dragstart', (e) => { dragId = b.id; dragBm = b.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', b.url); chip.classList.add('drag'); });
+    chip.addEventListener('dragend', () => { dragId = null; dragBm = null; chip.classList.remove('drag'); });
     chip.addEventListener('dragover', (e) => { if (dragId && dragId !== b.id) { e.preventDefault(); chip.classList.add('over'); } });
     chip.addEventListener('dragleave', () => chip.classList.remove('over'));
     chip.addEventListener('drop', async (e) => {
       e.preventDefault();
+      e.stopPropagation();
       chip.classList.remove('over');
+      dragBm = null;
       if (!dragId || dragId === b.id) return;
       const ids = bookmarks.map((x) => x.id).filter((x) => x !== dragId);
       ids.splice(ids.indexOf(b.id), 0, dragId);
@@ -283,7 +288,25 @@ function renderBookmarkBar() {
     bar.append(chip);
   }
   const other = el('button', { className: 'chip folder other', title: 'Other bookmarks', onclick: (ev) => showFolderDropdown(ev.currentTarget, 'other') }, 'Other bookmarks');
-  if (hasOther) bar.append(other);
+  if (hasOther || dragBm) bar.append(other);
+  makeDropTarget(other, 'other');
+}
+
+// a bookmark dropped on a folder chip moves into that folder; dropped on the empty bar it moves back to the bar
+function makeDropTarget(node, folderId) {
+  node.addEventListener('dragover', (e) => { if (dragBm) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; node.classList.add('over'); } });
+  node.addEventListener('dragleave', () => node.classList.remove('over'));
+  node.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    node.classList.remove('over');
+    if (!dragBm) return;
+    const id = dragBm;
+    dragBm = null;
+    dragId = null;
+    closePops();
+    moveBookmarks([id], folderId);
+  });
 }
 
 function initExtras() {
@@ -295,6 +318,9 @@ function initExtras() {
   $('ed-save').addEventListener('click', saveBookmarkEdit);
   $('ed-cancel').addEventListener('click', () => { $('editdlg').hidden = true; });
   for (const id of ['ed-title', 'ed-url']) $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') saveBookmarkEdit(); if (e.key === 'Escape') $('editdlg').hidden = true; });
+  const barBox = $('bmbar');
+  barBox.addEventListener('dragover', (e) => { if (dragBm) e.preventDefault(); });
+  barBox.addEventListener('drop', (e) => { e.preventDefault(); if (!dragBm) return; const id = dragBm; dragBm = null; closePops(); moveBookmarks([id], 'bar'); });
   $('bmbar').addEventListener('contextmenu', (ev) => {
     if (ev.target === $('bmbar') || ev.target.classList.contains('hint')) {
       ev.preventDefault();

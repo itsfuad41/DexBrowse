@@ -297,6 +297,7 @@ async function renderSettings(section) {
       main.append(sCard('Downloads',
         sRow('Location', 'Files are saved here.', el('code', {}, cfg.downloadsDir)),
         sRow('Ask where to save each file', '', switchEl(s.askDownload, (v) => setSetting({ askDownload: v }))),
+        sRow('Detect videos on pages', 'Shows a download button when a page plays a video or audio file. DRM-protected and YouTube-style streams cannot be saved.', switchEl(s.videoDetect !== false, (v) => setSetting({ videoDetect: v }))),
         sRow('Downloads list', 'Ctrl+J', sBtn('Open', () => showLibrary('downloads')))));
       break;
 

@@ -1,8 +1,11 @@
 // User agents, matching the phone app. "" means this browser's own Chrome UA.
-function userAgents(v) {
+function userAgents(v, appVersion, hostPlatform) {
   const chrome = `Chrome/${v}.0.0.0 Safari/537.36`;
   const webkit = 'AppleWebKit/537.36 (KHTML, like Gecko)';
+  const hostOS = hostPlatform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : hostPlatform === 'linux' ? 'X11; Linux x86_64' : 'Windows NT 10.0; Win64; x64';
   return {
+    // this browser's own name: shows up as "DexBrowse" on IP / identity lookup sites
+    'DexBrowse (default)': `Mozilla/5.0 (${hostOS}) ${webkit} ${chrome} DexBrowse/${appVersion || '1.0'}`,
     'Windows 10/11 · Chrome': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) ${webkit} ${chrome}`,
     'Windows 11 · Edge': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) ${webkit} ${chrome} Edg/${v}.0.0.0`,
     'Windows 10/11 · Firefox': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
@@ -23,7 +26,7 @@ function userAgents(v) {
     'Android · Chrome': `Mozilla/5.0 (Linux; Android 14; Pixel 8) ${webkit} Chrome/${v}.0.0.0 Mobile Safari/537.36`,
     'Android · Firefox': 'Mozilla/5.0 (Android 14; Mobile; rv:133.0) Gecko/133.0 Firefox/133.0',
     'Android · Samsung Internet': `Mozilla/5.0 (Linux; Android 14; SAMSUNG SM-S918B) ${webkit} SamsungBrowser/26.0 Chrome/${v}.0.0.0 Mobile Safari/537.36`,
-    'This browser (default)': ''
+    'Plain Chrome (hides the DexBrowse name)': ''
   };
 }
 
@@ -34,7 +37,7 @@ function metadataFor(ua, fullVersion, platformFallback) {
   const major = (/Chrome\/(\d+)/.exec(ua) || [])[1] || '130';
   const full = ua.includes(`Chrome/${major}.0.0.0`) ? `${major}.0.0.0` : fullVersion;
   const grease = { brand: 'Not?A_Brand', version: '99' };
-  const brand = /Edg\//.test(ua) ? 'Microsoft Edge' : /OPR\//.test(ua) ? 'Opera' : /Vivaldi|Ubuntu Chromium/.test(ua) ? null : 'Google Chrome';
+  const brand = /DexBrowse\//.test(ua) ? 'DexBrowse' : /Edg\//.test(ua) ? 'Microsoft Edge' : /OPR\//.test(ua) ? 'Opera' : /Vivaldi|Ubuntu Chromium/.test(ua) ? null : 'Google Chrome';
   const list = (ver) => [{ brand: 'Chromium', version: ver }, ...(brand ? [{ brand, version: ver }] : []), grease];
   let platform = platformFallback;
   let platformVersion = '';

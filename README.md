@@ -161,5 +161,11 @@ Brought the PC features to the Android app: Brave-style bookmarks with folders a
 - PC: Brave-style password list (Website / Username / Password columns, eye icon, ⋮ menu, filter by reused/weak, Import and Export CSV).
 - Android: move tabs up/down in the tab list, Close all tabs.
 
+### 2.25.0
+- PC: DexBrowse now identifies itself as `DexBrowse/<version>` in its user agent and browser hints (shows on IP / user-agent lookup sites). Google sites still get plain Chrome so sign-in works. Plain Chrome stays available in the user-agent menu.
+- PC: dragging a bookmark onto a bookmark-bar folder (or "Other bookmarks") moves it in; dropping on the bar moves it out.
+- PC: automatic video/audio detection on pages with a toolbar download button (direct files and unprotected HLS streams; no DRM or YouTube-style streams). Switch in Settings → Downloads.
+- Android: DexBrowse user agent name, and "Move to folder" for bookmarks.
+
 ### 2.24.0
 - PC: full-page bookmark manager (folders on the left, searchable list on the right, drag or bulk-move bookmarks into folders, sort, import/export).

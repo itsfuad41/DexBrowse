@@ -74,6 +74,14 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 #exttext { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #extbar button:not(.icon) { border: 1px solid var(--accent); padding: 5px 12px; border-radius: 8px; }
 #ext-pop { top: 78px; right: 90px; width: 340px; padding: 12px; }
+#media-pop { top: 78px; right: 110px; width: 360px; padding: 12px; }
+#mediabtn { position: relative; color: var(--accent); }
+#mediabtn::before { content: "⬇"; font-size: 16px; }
+#mediabtn b { position: absolute; top: 2px; right: 0; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--accent); color: #fff; font-size: 9px; line-height: 14px; text-align: center; }
+.mediarow { display: flex; align-items: center; gap: 10px; padding: 7px 4px; }
+.mediainfo { flex: 1; min-width: 0; }
+.mediainfo b, .mediainfo span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mediainfo span { color: var(--muted); font-size: 11.5px; }
 #prof-pop { top: 78px; right: 8px; width: 280px; }
 .pitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 10px; border-radius: 8px; }
 .pitem .av, .av { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex: none; }

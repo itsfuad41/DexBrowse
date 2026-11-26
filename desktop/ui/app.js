@@ -348,6 +348,7 @@ function activateTab(tab) {
   applyLayout();
   renderTabs();
   updateToolbar();
+  refreshMedia();
   $('findcount').textContent = '';
   if (isStart(tab.url) && !panelKind) $('address').focus();
 }
@@ -778,7 +779,7 @@ async function showShields() {
 
 // ---------- menu and popovers ----------
 function closePops() {
-  for (const id of ['menu', 'shields-pop', 'ctx', 'ext-pop', 'prof-pop', 'ua-pop', 'suggest', 'bmpop']) $(id).hidden = true;
+  for (const id of ['menu', 'shields-pop', 'ctx', 'ext-pop', 'media-pop', 'prof-pop', 'ua-pop', 'suggest', 'bmpop']) $(id).hidden = true;
 }
 
 function showMenu() {
@@ -919,6 +920,42 @@ async function showExtensions() {
   pop.append(el('button', { className: 'pitem', onclick: async () => { closePops(); const r = await dex.extensionsInstallFile(); if (r.ok && r.data) { toast('Added ' + r.data.name); refreshExtButton(); } else if (!r.ok) toast(r.error); } }, 'Install from .crx / .zip file…'));
   pop.append(el('button', { className: 'pitem', onclick: async () => { closePops(); const r = await dex.extensionsInstallUnpacked(); if (r.ok && r.data) { toast('Loaded ' + r.data.name); refreshExtButton(); } else if (!r.ok) toast(r.error); } }, 'Load unpacked folder…'));
   pop.append(el('div', { className: 'extnote' }, 'DexBrowse runs on Electron, which supports many but not all Chrome extension APIs. Pinned extensions show on the toolbar; click one to open its popup.'));
+  pop.hidden = false;
+}
+
+// ---------- videos found on the page ----------
+function mediaSize(n) {
+  if (!n) return '';
+  return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+}
+async function refreshMedia() {
+  const btn = $('mediabtn');
+  if (!active || !active.wcId || cfg.settings.videoDetect === false) { btn.hidden = true; return []; }
+  const r = await dex.mediaList(active.wcId);
+  const list = r && r.ok ? r.data : [];
+  btn.hidden = !list.length;
+  $('mediacount').textContent = list.length ? String(list.length) : '';
+  return list;
+}
+async function showMedia() {
+  const pop = $('media-pop');
+  if (!pop.hidden) { closePops(); return; }
+  closePops();
+  const list = await refreshMedia();
+  pop.replaceChildren(el('b', { style: 'display:block;padding:2px 4px 6px' }, 'Videos on this page'));
+  if (!list.length) pop.append(el('div', { className: 'extnote' }, 'No downloadable video found yet. Play the video and check again.'));
+  for (const m of list) {
+    const label = (m.audio ? 'Audio' : m.kind === 'hls' ? 'Video stream' : 'Video') + ' · ' + m.ext.toUpperCase() + (m.size ? ' · ' + mediaSize(m.size) : '');
+    let name = m.url;
+    try { name = decodeURIComponent(new URL(m.url).pathname.split('/').pop()) || new URL(m.url).hostname; } catch (_) { /* keep url */ }
+    const btn = el('button', { className: 'primary' }, 'Download');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const r = await dex.mediaDownload({ wcId: active.wcId, id: m.id, title: active.title });
+      if (r && r.ok) { toast('Downloading ' + r.data.name); btn.textContent = 'Started'; } else { toast((r && r.error) || 'Could not download'); btn.disabled = false; }
+    });
+    pop.append(el('div', { className: 'mediarow' }, el('div', { className: 'mediainfo' }, el('b', { title: m.url }, name), el('span', {}, label)), btn));
+  }
   pop.hidden = false;
 }
 
@@ -1123,6 +1160,7 @@ async function boot() {
   $('star').addEventListener('click', toggleBookmark);
   $('shieldbtn').addEventListener('click', showShields);
   $('extbtn').addEventListener('click', showExtensions);
+  $('mediabtn').addEventListener('click', showMedia);
   $('profbtn').addEventListener('click', showProfiles);
   $('extadd').addEventListener('click', async () => { if (extBarId && await installFromStore(extBarId)) $('extbar').hidden = true; });
   $('extclose').addEventListener('click', () => { if (extBarId) sessionStorage.setItem('extbar:' + extBarId, '1'); $('extbar').hidden = true; });
@@ -1182,6 +1220,7 @@ async function boot() {
     const t = tabs.find((x) => x.wcId === id);
     if (t) { t.blocked = count; if (t === active) updateShieldBadge(); }
   });
+  dex.on('media-update', ({ wcId }) => { if (active && active.wcId === wcId) refreshMedia(); });
   dex.on('download-update', (d) => {
     dlCache.set(d.id, d);
     if (d.state === 'completed') toast(`Downloaded ${d.name}`);
