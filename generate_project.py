@@ -1429,6 +1429,7 @@ class MainActivity : Activity() {
             "Chrome/${chromiumMajor}.0.0.0 Safari/537.36"
 
     private val userAgents = linkedMapOf(
+        "DexBrowse (default)" to "$desktopUA DexBrowse/${BuildConfig.VERSION_NAME}",
         "Windows 10/11 · Chrome" to desktopUA,
         "Windows 11 · Edge" to
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -2585,9 +2586,25 @@ document.getElementById('f').onsubmit=function(e){
         }
     }
 
+    // Google refuses sign-in from unknown browsers, so Google sites see plain Chrome
+    // while every other site sees the DexBrowse name.
+    private fun matchAgentToHost(web: WebView, host: String?) {
+        val current = web.settings.userAgentString ?: return
+        val h = host?.lowercase() ?: return
+        val google = h.split('.').let { parts -> parts.contains("google") } ||
+            listOf("gstatic.com", "googleusercontent.com", "googleapis.com", "youtube.com", "ytimg.com", "recaptcha.net")
+                .any { h == it || h.endsWith("." + it) }
+        if (google && current.contains(" DexBrowse/")) {
+            web.settings.userAgentString = current.substringBefore(" DexBrowse/")
+        } else if (!google && !current.contains(" DexBrowse/")) {
+            val selected = prefs.getString("user_agent", null) ?: "DexBrowse (default)"
+            if (selected == "DexBrowse (default)") web.settings.userAgentString = userAgents[selected]
+        }
+    }
+
     private fun applyView(web: WebView) {
         val selectedAgent = prefs.getString("user_agent", null)
-            ?: if (prefs.getBoolean("pcua", true)) "Windows 10/11 · Chrome"
+            ?: if (prefs.getBoolean("pcua", true)) "DexBrowse (default)"
             else "Android · Default"
         val wide = prefs.getBoolean("wide", true)
         web.settings.userAgentString = userAgents[selectedAgent]
@@ -2966,13 +2983,17 @@ document.getElementById('f').onsubmit=function(e){
                         handleInternal(uri)
                         true
                     }
-                    "http", "https" -> false
+                    "http", "https" -> {
+                        if (view != null) matchAgentToHost(view, uri.host)
+                        false
+                    }
                     else -> true
                 }
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                if (view != null) matchAgentToHost(view, try { android.net.Uri.parse(url ?: "").host } catch (_: Exception) { null })
                 val tab = tabs.firstOrNull { it.web === view }
                 if (tab != null && (url?.startsWith("https://") == true || url?.startsWith("http://") == true)) {
                     tab.lastOnlineUrl = url
@@ -3487,7 +3508,7 @@ document.getElementById('f').onsubmit=function(e){
     private fun chooseUserAgent() {
         val choices = userAgents.keys.toTypedArray()
         val selectedAgent = prefs.getString("user_agent", null)
-            ?: if (prefs.getBoolean("pcua", true)) "Windows 10/11 · Chrome"
+            ?: if (prefs.getBoolean("pcua", true)) "DexBrowse (default)"
             else "Android · Default"
         dialog()
             .setTitle("User agent")
@@ -3916,11 +3937,32 @@ document.getElementById('f').onsubmit=function(e){
         val url = entry.optString("url")
         dialog()
             .setTitle(entry.optString("title").ifBlank { url })
-            .setItems(arrayOf("Open in new tab", "Edit", "Copy link address", "Delete")) { _, action ->
+            .setItems(arrayOf("Open in new tab", "Edit", "Move to folder", "Copy link address", "Delete")) { _, action ->
                 when (action) {
                     0 -> addTab(url)
                     1 -> showBookmarkPopup(url, false)
                     2 -> {
+                        val choices = folderChoices()
+                        val now = choices.indexOfFirst { it.first == entry.optString("folder") }.coerceAtLeast(0)
+                        dialog()
+                            .setTitle("Move to folder")
+                            .setSingleChoiceItems(choices.map { it.second }.toTypedArray(), now) { d, index ->
+                                val chosen = choices[index].first
+                                if (chosen.isEmpty()) entry.remove("folder") else entry.put("folder", chosen)
+                                val all = bookmarkEntries()
+                                for (i in 0 until all.length()) {
+                                    val e = all.optJSONObject(i) ?: continue
+                                    if (e.optString("url") == url) { if (chosen.isEmpty()) e.remove("folder") else e.put("folder", chosen) }
+                                }
+                                saveBookmarkEntries(all)
+                                d.dismiss()
+                                toast("Moved to ${choices[index].second}")
+                                showBookmarks()
+                            }
+                            .setNegativeButton("Back") { _, _ -> showBookmarks() }
+                            .show()
+                    }
+                    3 -> {
                         copyText("link", url)
                         toast("Link copied")
                     }
