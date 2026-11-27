@@ -1,7 +1,7 @@
 {
   "name": "dexbrowse-desktop",
   "productName": "DexBrowse",
-  "version": "2.25.0",
+  "version": "2.25.1",
   "description": "DexBrowse",
   "main": "main.js",
   "author": "Md. Fuad Hasan",
@@ -26,6 +26,7 @@
       "shieldlists.js",
       "config.js",
       "uas.js",
+      "media.js",
       "app-config.json",
       "ui/**/*",
       "package.json",
