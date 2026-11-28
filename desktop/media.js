@@ -27,7 +27,9 @@ function classify(details) {
   if (/mpegurl/.test(type) || /\.m3u8$/i.test(path)) return { kind: 'hls', ext: 'mp4', mime: type, size: 0 };
   if (/dash\+xml/.test(type) || /\.mpd$/i.test(path)) return null; // not supported
   if (type === 'video/mp2t' || SEGMENT_EXT.test(path)) return null; // one piece of a stream
-  const isMedia = type.startsWith('video/') || /^audio\/(mpeg|mp4|ogg|webm|aac|wav|x-m4a|flac|opus)/.test(type) ||
+  // the browser itself says this request feeds a <video>/<audio> element, whatever the server calls it
+  const asMedia = details.resourceType === 'media' && !/^(text|image)\//.test(type) && !/json|xml|html|javascript/.test(type);
+  const isMedia = asMedia || type.startsWith('video/') || /^audio\/(mpeg|mp4|ogg|webm|aac|wav|x-m4a|flac|opus)/.test(type) ||
     (type === 'application/octet-stream' && DIRECT_EXT.test(path)) || (type === 'application/ogg');
   if (!isMedia) return null;
   let size = Number(header(details.responseHeaders, 'content-length')) || 0;
@@ -57,10 +59,12 @@ function createMediaSniffer({ isEnabled, onChange }) {
   function attach(ses) {
     ses.webRequest.onResponseStarted({ urls: ['http://*/*', 'https://*/*'] }, (details) => {
       try {
-        if (!isEnabled() || !details.webContentsId) return;
+        if (!isEnabled()) return;
         const found = classify(details);
         if (!found) return;
-        const wc = webContents.fromId(details.webContentsId);
+        // requests from embedded players (iframes) may carry no id: resolve through the frame
+        let wc = details.webContentsId ? webContents.fromId(details.webContentsId) : null;
+        if (!wc && details.frame) { try { wc = webContents.fromFrame(details.frame); } catch (_) { wc = null; } }
         if (!wc || wc.isDestroyed() || wc.getType() !== 'webview') return;
         watch(wc);
         let items = store.get(wc.id);

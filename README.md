@@ -161,6 +161,9 @@ Brought the PC features to the Android app: Brave-style bookmarks with folders a
 - PC: Brave-style password list (Website / Username / Password columns, eye icon, ⋮ menu, filter by reused/weak, Import and Export CSV).
 - Android: move tabs up/down in the tab list, Close all tabs.
 
+### 2.26.0
+- PC: download-manager style video detection: a "⬇ Download video" button appears over the video when a downloadable file is found, and any file the page plays as video/audio is detected whatever the server calls it.
+
 ### 2.25.1
 - PC: fixes the installed app not opening (a new file was missing from the installer).
 

@@ -198,6 +198,40 @@ document.addEventListener('focusout', () => setTimeout(hideSuggest, 120), true);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideSuggest(); }, true);
 window.addEventListener('scroll', hideSuggest, true);
 
+// ---- "Download this video" button over the playing video, like a download manager ----
+// The browser tells this page when it has found a downloadable file; otherwise nothing is shown.
+let mediaReady = false;
+let pill = null;
+function bestVideo() {
+  let best = null;
+  let area = 0;
+  for (const v of document.querySelectorAll('video')) {
+    const r = v.getBoundingClientRect();
+    const a = r.width * r.height;
+    if (r.width >= 240 && r.height >= 140 && r.bottom > 0 && r.top < innerHeight && a > area) { best = v; area = a; }
+  }
+  return best;
+}
+function placePill() {
+  if (!mediaReady) { if (pill) { pill.remove(); pill = null; } return; }
+  const v = bestVideo();
+  if (!v) { if (pill) pill.style.display = 'none'; return; }
+  if (!pill) {
+    pill = document.createElement('div');
+    pill.textContent = '⬇ Download video';
+    pill.style.cssText = 'position:fixed;z-index:2147483647;padding:6px 12px;border-radius:16px;background:#1a73e8;color:#fff;font:600 12px system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4);user-select:none;opacity:.92';
+    pill.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    pill.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); ipcRenderer.sendToHost('media-open', { origin: location.origin }); });
+    (document.body || document.documentElement).appendChild(pill);
+  }
+  const r = v.getBoundingClientRect();
+  pill.style.display = 'block';
+  pill.style.top = Math.max(8, r.top + 8) + 'px';
+  pill.style.left = Math.max(8, Math.min(innerWidth - 150, r.right - 150)) + 'px';
+}
+ipcRenderer.on('media-ready', (_event, on) => { mediaReady = !!on; placePill(); });
+setInterval(() => { if (mediaReady || pill) placePill(); }, 1000);
+
 let asked = false;
 function maybeAsk() {
   if (asked || !document.querySelector('input[type=password]')) return;

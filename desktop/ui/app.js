@@ -1025,6 +1025,10 @@ async function onGuestMessage(tab, e) {
   if (!data || PRIV) return;
   const current = (() => { try { return new URL(tab.view.getURL()).origin; } catch (_) { return ''; } })();
   if (data.origin !== current) return;
+  if (e.channel === 'media-open') {
+    if (tab === active) { $('media-pop').hidden = true; await showMedia(); }
+    return;
+  }
   if (e.channel === 'login-request') {
     if (!(/^https:/.test(data.origin) || /^http:\/\/(localhost|127\.0\.0\.1)/.test(data.origin))) return;
     const res = await dex.loginsAccounts(data.origin);
@@ -1220,7 +1224,11 @@ async function boot() {
     const t = tabs.find((x) => x.wcId === id);
     if (t) { t.blocked = count; if (t === active) updateShieldBadge(); }
   });
-  dex.on('media-update', ({ wcId }) => { if (active && active.wcId === wcId) refreshMedia(); });
+  dex.on('media-update', ({ wcId, count }) => {
+    const t = tabs.find((x) => x.wcId === wcId);
+    if (t && t.view && t.ready) { try { t.view.send('media-ready', count > 0 && cfg.settings.videoDetect !== false); } catch (_) { /* tab is closing */ } }
+    if (active && active.wcId === wcId) refreshMedia();
+  });
   dex.on('download-update', (d) => {
     dlCache.set(d.id, d);
     if (d.state === 'completed') toast(`Downloaded ${d.name}`);
